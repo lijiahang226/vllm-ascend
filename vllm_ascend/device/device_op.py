@@ -18,7 +18,6 @@
 import torch
 import torch_npu
 
-from vllm_ascend.attention.attn_data import DecodeMLAPreprocessResult
 from vllm_ascend.device.mxfp_compat import (
     FLOAT4_E2M1FN_X2_DTYPE,
     FLOAT8_E8M0FNU_DTYPE,
@@ -287,6 +286,67 @@ class BaseDeviceAdaptor:
             decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope=dequant_scale_q_nope
         )
         return decode_preprocess_res, None
+
+    @staticmethod
+    def _sfa_preprocess_with_mlapo(
+        atten_obj,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        num_input_tokens: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        k_nope, k_pe = kv_cache[0], kv_cache[1]
+        ql_nope = torch.empty(
+            (num_input_tokens, atten_obj.W_UK_T.shape[0], k_nope.shape[-1]),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        q_pe = torch.empty(
+            (num_input_tokens, atten_obj.W_UK_T.shape[0], k_pe.shape[-1]),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        q_c = torch.empty(
+            (num_input_tokens, atten_obj.q_lora_rank),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        torch.ops._C_ascend.mla_preprocess(
+            hidden_states,
+            atten_obj.wd_qkv,
+            atten_obj.deq_scale_qkv,
+            atten_obj.gamma1,
+            atten_obj.beta1,
+            atten_obj.wu_q,
+            atten_obj.qb_deq_scl,
+            atten_obj.gamma2,
+            cos,
+            sin,
+            atten_obj.W_UK_T,
+            k_nope,
+            k_pe,
+            slot_mapping,
+            quant_scale0=atten_obj.quant_scale0,
+            quant_offset0=atten_obj.quant_offset0,
+            bias0=atten_obj.quant_bias_qkv,
+            quant_scale1=atten_obj.quant_scale1,
+            quant_offset1=atten_obj.quant_offset1,
+            bias1=atten_obj.qb_qt_bias,
+            ctkv_scale=atten_obj.ctkv_scale,
+            q_nope_scale=atten_obj.q_nope_scale,
+            cache_mode="krope_ctkv",
+            quant_mode="per_tensor_quant_asymm",
+            enable_inner_out=True,
+            q_out0=ql_nope,
+            kv_cache_out0=k_nope,
+            q_out1=q_pe,
+            kv_cache_out1=k_pe,
+            inner_out=q_c,
+        )
+        return ql_nope, q_pe, q_c
+    
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
@@ -575,7 +635,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             rope_cos=cos,
             kv_cache=decode_k_nope,
             kr_cache=decode_k_pe,
-            cache_index=attn_metadata.slot_mapping[:bsz].view(bsz, -1).to(torch.int64),
+            cache_index=attn_metadata.slot_mapping[:bsz].view(bsz, -1),
             dequant_scale_x=dynamic_scale.view(FLOAT8_E8M0FNU_DTYPE),
             dequant_scale_w_dq=atten_obj.weight_dq_scale.view(FLOAT8_E8M0FNU_DTYPE),
             dequant_scale_w_uq_qr=atten_obj.weight_uq_qr_scale.view(FLOAT8_E8M0FNU_DTYPE),
@@ -589,6 +649,51 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         decode_q_pe = decode_q_pe.view(bsz, atten_obj.num_heads, -1)
         decode_preprocess_res = DecodeMLAPreprocessResult(decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe)
         return decode_preprocess_res, None
+
+    @staticmethod
+    def _sfa_preprocess_with_mlapo(
+        atten_obj,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        num_input_tokens: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        hidden_states = hidden_states[:num_input_tokens]
+        ori_type = hidden_states.dtype
+        hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=torch.float8_e4m3fn)
+        dynamic_scale = dynamic_scale.reshape(hidden_states.shape[0], -1)
+
+        kv = kv_cache[0]
+        kr = torch.zeros((0, 0, kv.shape[2], cos.shape[-1]), dtype=torch.bfloat16, device=kv)
+        
+        q_nope, _, _, q_c, q_c_scale = torch_npu.npu_mla_prolog_v3(
+            token_x=hidden_states,
+            weight_dq=self.weight_dq,
+            weight_uq_qr=self.weight_uq_qr,
+            weight_uk=self.W_UK_T,
+            weight_dkv_kr=self.weight_dkv_kr,
+            rmsnorm_gamma_cq=self.q_a_layernorm.weight.data,
+            rmsnorm_gamma_ckv=self.kv_a_layernorm.weights.data,
+            rope_sin=sin,
+            rope_cos=cos,
+            kv_cache=kv,
+            kr_cache=kr,
+            cache_index=slot_mapping[:num_input_tokens].view(num_input_tokens, -1),
+            dequant_scale_x=dynamic_scale,
+            dequant_scale_w_dq=self.weight_dq_scale,
+            dequant_scale_w_uq_qr=self.weight_uq_qr_scale,
+            dequant_scale_w_dkv_kr=self.weight_dkv_kr_scale,
+            cache_mode="PA_BSND",
+            weight_quant_mode=3,
+            kv_cache_quant_mode=3,
+            query_quant_mode=0,
+            ckvkr_repo_mode=1,
+            quant_scale_repo_mode=1,
+            query_norm_flag=True
+        )
+        return ql_nope, q_pe, (q_c, q_c_scale, ori_type)
 
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:

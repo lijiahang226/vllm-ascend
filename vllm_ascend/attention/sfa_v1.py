@@ -46,7 +46,10 @@ from vllm_ascend.ops.layer_shard_linear import (
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
+from vllm_ascend.quantization.methods.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.utils import (
+    AscendDeviceType,
+    get_ascend_device_type,
     ACL_FORMAT_FRACTAL_ND,
     _round_up,
     dispose_layer,
@@ -57,7 +60,7 @@ from vllm_ascend.utils import (
     maybe_trans_nz,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
-
+from vllm_ascend.device.device_op import DeviceOperator
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -442,8 +445,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         # dsa c8
         self.use_sparse_c8_indexer = ascend_config.enable_sparse_c8
         if self.use_sparse_c8_indexer:
-            self.c8_k_cache_dtype = torch.int8
-            self.c8_k_scale_cache_dtype = torch.float16
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                self.c8_k_cache_dtype = FLOAT8_E4M3FN_DTYPE
+                self.c8_k_scale_cache_dtype = torch.float32
+            else:
+                self.c8_k_cache_dtype = torch.int8
+                self.c8_k_scale_cache_dtype = torch.float16
 
         # Effective in SFA when FlashComm is enabled.
         self.enable_dsa_cp = enable_dsa_cp()
@@ -537,7 +544,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 None,
             )
             reasons = []
-            if self.fused_qkv_a_proj is None or not isinstance(quant_method, AscendW8A8LinearMethod):
+            if self.fused_qkv_a_proj is None or (not isinstance(quant_method, AscendW8A8LinearMethod) and not isinstance(quant_method, AscendW8A8MXFP8DynamicLinearMethod)):
                 reasons.append(
                     "Currently mlapo only supports W8A8 quantization in SFA scenario."
                     "Some layers in your model are not quantized with W8A8,"
@@ -549,8 +556,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                 self.enable_mlapo = False
                 for msg in reasons:
                     logger.warning_once(msg)
+            elif get_ascend_device_type() == AscendDeviceType.A5:
+                self.process_weights_for_fused_mlapo_a5(act_dtype)
             else:
-                self._process_weights_for_fused_mlapo(act_dtype)
+                self.process_weights_for_fused_mlapo(act_dtype)
         if not self.enable_mlapo:
             # if mlapo, W_UK_T can't trans nz
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
@@ -640,6 +649,26 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.q_proj.deq_scale = None
             self.q_proj.quant_bias = None
             torch.npu.empty_cache()
+
+    def process_weights_for_fused_mlapo_a5(self, act_dtype: torch.dtype):
+        weight_dq = self.fused_qkv_a_proj.weight.data[..., : self.q_lora_rank].contiguous()
+        self.weight_dq = torch_npu.npu_format_cast(weight_dq, 29)
+
+        weight_uq_qr = self.q_proj.weight.data.contiguous()
+        self.weight_uq_qr_scale = self.q_proj.weight_scale.data.transpose(0, 1)
+        self.weight_uq_qr_scale = self.weight_uq_qr_scale.reshape(
+            -1, self.weight_uq_qr_scale.shape[1] * self.weight_uq_qr_scale.shape[2]
+        )
+        self.weight_uq_qr = torch_npu.npu_format_cast(weight_uq_qr, 29)
+
+        weight_dkv_kr = self.fused_qkv_a_proj.weight.data[..., self.q_lora_rank :].contiguous()
+        self.weight_dkv_kr = torch_npu.npu_format_cast(weight_dkv_kr, 29)
+
+        weight_scale = self.fused_qkv_a_proj.weight_scale
+        weight_scale = weight_scale.transpose(0, 1)
+        weight_scale = weight_scale.reshape(-1, weight_scale.shape[1] * weight_scale.shape[2])
+        self.weight_dq_scale = weight_scale[: self.q_lora_rank, ...]
+        self.weight_dkv_kr_scale = weight_scale[self.q_lora_rank :, ...]
 
     def forward_mha(
         self,
@@ -815,83 +844,15 @@ class AscendSFAImpl(MLAAttentionImpl):
         return ql_nope.transpose(0, 1), q_pe
 
     def _v_up_proj(self, x):
-        num_input_tokens, _, _ = x.shape
-        if (
-            x.dtype in [torch.float16, torch.bfloat16]
-            and hasattr(torch.ops._C_ascend, "batch_matmul_transpose")
-            and num_input_tokens <= BMM_TRANS_MAX_SUPPORTED_TOKENS
-        ):
-            x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
-            res = torch.empty((num_input_tokens, self.local_num_heads, self.v_head_dim), dtype=x.dtype, device=x.device)
-            torch.ops._C_ascend.batch_matmul_transpose(x, self.W_UV, res)
-            x = res.reshape(-1, self.local_num_heads * self.v_head_dim)
-        else:
-            # Convert from (B, N, L) to (N, B, L)
-            x = x.view(-1, self.local_num_heads, self.kv_lora_rank).transpose(0, 1)
-            # # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
-            x = torch.bmm(x, self.W_UV)
-            # # Convert from (N, B, V) to (B, N * V)
-            x = x.transpose(0, 1).reshape(-1, self.local_num_heads * self.v_head_dim)
+        # Convert from (N, B, L)/(N, B, 1, L) to (N, B, L)
+        x = x.view(self.local_num_heads, -1, self.kv_lora_rank)
+        # Multiply (N, B, L) x (N, L, V) -> (B, N, V)
+        x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_y=(1, 0, 2))
+        # Convert from (B, N, V) to (B, N * V)
+        x = x.reshape(-1, self.num_heads * self.v_head_dim)
         return x
 
-    def _sfa_preprocess_with_mlapo(
-        self,
-        hidden_states: torch.Tensor,
-        kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        num_input_tokens: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        k_nope, k_pe = kv_cache[0], kv_cache[1]
-        ql_nope = torch.empty(
-            (num_input_tokens, self.W_UK_T.shape[0], k_nope.shape[-1]),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-        q_pe = torch.empty(
-            (num_input_tokens, self.W_UK_T.shape[0], k_pe.shape[-1]),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-        q_c = torch.empty(
-            (num_input_tokens, self.q_lora_rank),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-        torch.ops._C_ascend.mla_preprocess(
-            hidden_states,
-            self.wd_qkv,
-            self.deq_scale_qkv,
-            self.gamma1,
-            self.beta1,
-            self.wu_q,
-            self.qb_deq_scl,
-            self.gamma2,
-            cos,
-            sin,
-            self.W_UK_T,
-            k_nope,
-            k_pe,
-            slot_mapping,
-            quant_scale0=self.quant_scale0,
-            quant_offset0=self.quant_offset0,
-            bias0=self.quant_bias_qkv,
-            quant_scale1=self.quant_scale1,
-            quant_offset1=self.quant_offset1,
-            bias1=self.qb_qt_bias,
-            ctkv_scale=self.ctkv_scale,
-            q_nope_scale=self.q_nope_scale,
-            cache_mode="krope_ctkv",
-            quant_mode="per_tensor_quant_asymm",
-            enable_inner_out=True,
-            q_out0=ql_nope,
-            kv_cache_out0=k_nope,
-            q_out1=q_pe,
-            kv_cache_out1=k_pe,
-            inner_out=q_c,
-        )
-        return hidden_states, ql_nope, q_pe, q_c
+    
 
     def indexer_select_pre_process(
         self,
@@ -973,23 +934,42 @@ class AscendSFAImpl(MLAAttentionImpl):
         # TODO: torch.ops._C_ascend.npu_lightning_indexer needs to be removed.
         if self.use_sparse_c8_indexer:
             assert len(kv_cache) == 4
-            weights = weights.to(torch.float16)
-            topk_indices = torch.ops._C_ascend.npu_lightning_indexer_quant(
-                query=q_li.view(q_li_shape_ori),
-                key=kv_cache[2],
-                weights=weights,
-                query_dequant_scale=q_li_scale.view(q_li_shape_ori[:-1]),
-                key_dequant_scale=kv_cache[3].squeeze(2),  # B S N D -> B S D
-                actual_seq_lengths_query=actual_seq_lengths_query,
-                actual_seq_lengths_key=actual_seq_lengths_key,
-                block_table=attn_metadata.block_table,
-                query_quant_mode=0,
-                key_quant_mode=0,
-                layout_query="TND",
-                layout_key="PA_BSND",
-                sparse_count=2048,
-                sparse_mode=3,
-            )
+            if get_ascend_device_type != AscendDeviceType.A5:
+                weights = weights.to(torch.float16)
+                topk_indices = torch.ops._C_ascend.npu_lightning_indexer_quant(
+                    query=q_li.view(q_li_shape_ori),
+                    key=kv_cache[2],
+                    weights=weights,
+                    query_dequant_scale=q_li_scale.view(q_li_shape_ori[:-1]),
+                    key_dequant_scale=kv_cache[3].squeeze(2),  # B S N D -> B S D
+                    actual_seq_lengths_query=actual_seq_lengths_query,
+                    actual_seq_lengths_key=actual_seq_lengths_key,
+                    block_table=attn_metadata.block_table,
+                    query_quant_mode=0,
+                    key_quant_mode=0,
+                    layout_query="TND",
+                    layout_key="PA_BSND",
+                    sparse_count=2048,
+                    sparse_mode=3,
+                )
+            else:
+                weights = weights.to(torch.bfloat16)
+                topk_indices = torch_npu.npu_quant_lightning_indexer(
+                    query=q_li.view(q_li_shape_ori),
+                    key=kv_cache[2],
+                    weights=weights,
+                    query_dequant_scale=q_li_scale.view(q_li_shape_ori[:-1]),
+                    key_dequant_scale=kv_cache[3].squeeze(2),  # B S N D -> B S D
+                    actual_seq_lengths_query=actual_seq_lengths_query,
+                    actual_seq_lengths_key=actual_seq_lengths_key,
+                    block_table=attn_metadata.block_table,
+                    query_quant_mode=0,
+                    key_quant_mode=0,
+                    layout_query="TND",
+                    layout_key="PA_BSND",
+                    sparse_count=2048,
+                    sparse_mode=3,
+                )
         elif self.use_torch_npu_lightning_indexer:
             topk_indices, _ = torch_npu.npu_lightning_indexer(
                 query=q_li,
@@ -1024,23 +1004,46 @@ class AscendSFAImpl(MLAAttentionImpl):
         block_table = attn_metadata.block_table
         kv = kv_cache[0]
         key_rope = kv_cache[1]
-
-        attn_output = torch.ops._C_ascend.npu_sparse_flash_attention(
-            query=ql_nope,
-            key=kv,
-            value=kv,
-            sparse_indices=topk_indices,
-            scale_value=self.scale,
-            sparse_block_size=1,
-            block_table=block_table,
-            actual_seq_lengths_query=actual_seq_lengths_query,
-            actual_seq_lengths_kv=actual_seq_lengths_key,
-            query_rope=q_pe,
-            key_rope=key_rope,
-            layout_query="TND",
-            layout_kv="PA_BSND",
-            sparse_mode=3,
-        )
+        
+        if get_ascend_device_type == AscendDeviceType.A5:
+            query = torch.cat([ql_nope, q_pe], dim=-1)
+            attn_output = torch_npu.npu_kv_quant_sparse_flash_attention(
+                query=query,
+                key=kv,
+                value=kv,
+                sparse_indices=topk_indices,
+                scale_value=self.scale,
+                sparse_block_size=1,
+                block_table=block_table,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_kv=actual_seq_lengths_key,
+                layout_query="TND",
+                layout_kv="PA_BSND",
+                sparse_mode=3,
+                attention_mode=2,
+                quant_scale_repo_mode=1,
+                tile_size=128,
+                key_quant_mode=2,
+                value_quant_mode=2,
+                rope_head_dim=64
+            )
+        else:
+            attn_output = torch.ops._C_ascend.npu_sparse_flash_attention(
+                query=ql_nope,
+                key=kv,
+                value=kv,
+                sparse_indices=topk_indices,
+                scale_value=self.scale,
+                sparse_block_size=1,
+                block_table=block_table,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_kv=actual_seq_lengths_key,
+                query_rope=q_pe,
+                key_rope=key_rope,
+                layout_query="TND",
+                layout_kv="PA_BSND",
+                sparse_mode=3,
+            )
         return attn_output
 
     def forward(
@@ -1089,7 +1092,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         # run mlapo ops when dsa-cp is disabled, and ensure that num_tokens satisfies the count limitation
         if self.enable_mlapo and num_input_tokens <= MLAPO_MAX_SUPPORTED_TOKENS:
-            hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_with_mlapo(
+            ql_nope, q_pe, q_c = DeviceOperator._sfa_preprocess_with_mlapo(
                 hidden_states=hidden_states,
                 kv_cache=kv_cache,
                 cos=cos,
