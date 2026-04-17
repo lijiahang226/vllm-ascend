@@ -66,42 +66,22 @@ class VllmEplbAdaptor:
 
     def init_expert_param_per_layer(self):
         self.param_dict = dict()
-        if self.model.quant_config is not None:
-            quant_type = self.model.model.layers[self.num_dense_layers].mlp.experts.quant_type
-            if quant_type == QuantType.W8A8:
-                self.expert_weight_names = [
-                    "w13_weight_list",
-                    "w2_weight_list",
-                    "w13_weight_scale_fp32_list",
-                    "w2_weight_scale_list",
-                ]
-                if get_ascend_config().enable_fused_mc2 == 1:
-                    self.expert_weight_names.append("fused_w1_scale_list")
-                    self.expert_weight_names.append("fused_w2_scale_list")
-
-            elif quant_type == QuantType.W4A8:
-                if get_ascend_config().enable_fused_mc2 != 1:
-                    raise ValueError("EPLB not support W4A8 with fused MC2 disabled")
-                self.expert_weight_names = [
-                    "w13_weight_list",
-                    "w2_weight_list",
-                    "w13_weight_scale_list",
-                    "w2_weight_scale_list",
-                    "w13_scale_bias_list",
-                    "w2_scale_bias_list",
-                ]
-
-            elif quant_type in (QuantType.MXFP4, QuantType.MXFP8):
-                self.expert_weight_names = [
-                    "w13_weight",
-                    "w2_weight",
-                    "w13_weight_scale",
-                    "w2_weight_scale",
-                ]
-            else:
-                raise ValueError(f"EPLB not support {quant_type}")
-        else:
-            self.expert_weight_names = ["w13_weight", "w2_weight"]
+        # if self.model.quant_config is not None:
+        #     quant_type = self.model.model.layers[self.num_dense_layers].mlp.experts.quant_type
+        #     if quant_type == QuantType.W8A8:
+        #         self.expert_weight_names = [
+        #             "w13_weight_list",
+        #             "w2_weight_list",
+        #             "w13_weight_scale_fp32_list",
+        #             "w2_weight_scale_list",
+        #         ]
+        #         if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
+        #             self.expert_weight_names.append("fused_w1_scale_list")
+        #             self.expert_weight_names.append("fused_w2_scale_list")
+        #     else:
+        #         raise ValueError(f"EPLB not support {quant_type}")
+        # else:
+        self.expert_weight_names = ["w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"]
 
         for layer_idx in range(self.num_dense_layers, self.config.num_hidden_layers):
             self.expert_param_per_layer[layer_idx] = list()
