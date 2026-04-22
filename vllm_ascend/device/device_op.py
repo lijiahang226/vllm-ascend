@@ -200,6 +200,247 @@ class BaseDeviceAdaptor:
             value=value,
         )
 
+    @staticmethod
+    def mla_preprocess_only_decode(atten_obj, hidden_states, kv_cache, attn_metadata):
+        bsz = attn_metadata.num_decode_tokens
+        hidden_states = hidden_states[:bsz]
+
+        cos_shape = attn_metadata.decode.cos.shape
+        cos = attn_metadata.decode.cos.view(cos_shape[0], cos_shape[-1])
+        sin = attn_metadata.decode.sin.view(cos_shape[0], cos_shape[-1])
+
+        decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
+        dequant_scale_q_nope = None
+        if atten_obj.fa_quant_layer:
+            quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
+            decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope = torch_npu.npu_mla_prolog_v2(
+                quantized_x,
+                atten_obj.wd_q,
+                atten_obj.wu_q,
+                atten_obj.W_UK_T,
+                atten_obj.wd_kv,
+                atten_obj.gamma1,
+                atten_obj.gamma2,
+                sin,
+                cos,
+                attn_metadata.slot_mapping[:bsz].to(torch.int64),
+                decode_k_nope,
+                decode_k_pe,
+                dequant_scale_x=pertoken_scale.view(-1, 1),
+                dequant_scale_w_dq=atten_obj.dequant_scale_w_dq,
+                dequant_scale_w_uq_qr=atten_obj.dequant_scale_w_uq_qr,
+                dequant_scale_w_dkv_kr=atten_obj.dequant_scale_w_dkv_kr,
+                quant_scale_ckv=atten_obj.quant_kscale,
+                cache_mode="PA_NZ",
+            )
+        else:
+            decode_q_nope = torch.empty(
+                (hidden_states.shape[0], atten_obj.W_UK_T.shape[0], decode_k_nope.shape[-1]),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            decode_q_pe = torch.empty(
+                (hidden_states.shape[0], atten_obj.W_UK_T.shape[0], decode_k_pe.shape[-1]),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+
+            torch.ops._C_ascend.mla_preprocess(
+                hidden_states,
+                atten_obj.wd_qkv,
+                atten_obj.deq_scale_qkv,
+                atten_obj.gamma1,
+                atten_obj.beta1,
+                atten_obj.wu_q,
+                atten_obj.qb_deq_scl,
+                atten_obj.gamma2,
+                cos,
+                sin,
+                atten_obj.W_UK_T,
+                decode_k_nope,
+                decode_k_pe,
+                attn_metadata.slot_mapping[:bsz],
+                quant_scale0=atten_obj.quant_scale0,
+                quant_offset0=atten_obj.quant_offset0,
+                bias0=atten_obj.quant_bias_qkv,
+                quant_scale1=atten_obj.quant_scale1,
+                quant_offset1=atten_obj.quant_offset1,
+                bias1=atten_obj.qb_qt_bias,
+                ctkv_scale=atten_obj.ctkv_scale,
+                q_nope_scale=atten_obj.q_nope_scale,
+                cache_mode="nzcache" if atten_obj.enable_kv_nz else "krope_ctkv",
+                quant_mode="per_tensor_quant_asymm",
+                q_out0=decode_q_nope,
+                kv_cache_out0=decode_k_nope,
+                q_out1=decode_q_pe,
+                kv_cache_out1=decode_k_pe,
+                enable_inner_out=False,
+                inner_out=torch.tensor([], device=hidden_states.device),
+            )
+            decode_q_nope = decode_q_nope.view(bsz, atten_obj.num_heads, atten_obj.kv_lora_rank)
+            decode_q_pe = decode_q_pe.view(bsz, atten_obj.num_heads, -1)
+
+        decode_q_nope, decode_q_pe = atten_obj.reorg_decode_q(decode_q_nope, decode_q_pe)
+
+        from vllm_ascend.attention.mla_v1 import DecodeMLAPreprocessResult
+
+        decode_preprocess_res = DecodeMLAPreprocessResult(
+            decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope=dequant_scale_q_nope
+        )
+        return decode_preprocess_res, None
+    def sfa_preprocess_with_mlapo(
+        sfa_impl,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        num_input_tokens: int,
+    ) -> tuple:
+        k_nope, k_pe = kv_cache[0], kv_cache[1]
+        ql_nope = torch.empty(
+            (num_input_tokens, sfa_impl.W_UK_T.shape[0], k_nope.shape[-1]),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        q_pe = torch.empty(
+            (num_input_tokens, sfa_impl.W_UK_T.shape[0], k_pe.shape[-1]),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        q_c = torch.empty(
+            (num_input_tokens, sfa_impl.q_lora_rank),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        torch.ops._C_ascend.mla_preprocess(
+            hidden_states,
+            sfa_impl.wd_qkv,
+            sfa_impl.deq_scale_qkv,
+            sfa_impl.gamma1,
+            sfa_impl.beta1,
+            sfa_impl.wu_q,
+            sfa_impl.qb_deq_scl,
+            sfa_impl.gamma2,
+            cos,
+            sin,
+            sfa_impl.W_UK_T,
+            k_nope,
+            k_pe,
+            slot_mapping,
+            quant_scale0=sfa_impl.quant_scale0,
+            quant_offset0=sfa_impl.quant_offset0,
+            bias0=sfa_impl.quant_bias_qkv,
+            quant_scale1=sfa_impl.quant_scale1,
+            quant_offset1=sfa_impl.quant_offset1,
+            bias1=sfa_impl.qb_qt_bias,
+            ctkv_scale=sfa_impl.ctkv_scale,
+            q_nope_scale=sfa_impl.q_nope_scale,
+            cache_mode="krope_ctkv",
+            quant_mode="per_tensor_quant_asymm",
+            enable_inner_out=True,
+            q_out0=ql_nope,
+            kv_cache_out0=k_nope,
+            q_out1=q_pe,
+            kv_cache_out1=k_pe,
+            inner_out=q_c,
+        )
+        return hidden_states, ql_nope, q_pe, q_c
+
+    @staticmethod
+    def indexer_select_post_process(
+        sfa_impl,
+        q_li: torch.Tensor,
+        q_li_scale: torch.Tensor | None,
+        q_li_shape_ori: tuple,
+        weights: torch.Tensor,
+        kv_cache: tuple,
+        attn_metadata,
+        actual_seq_lengths_query: torch.Tensor,
+        actual_seq_lengths_key: torch.Tensor,
+        use_sparse_c8_indexer: bool,
+        use_torch_npu_lightning_indexer: bool,
+    ) -> torch.Tensor:
+        if use_sparse_c8_indexer:
+            assert len(kv_cache) == 4
+            weights = weights.to(torch.float16)
+            topk_indices = torch.ops._C_ascend.npu_lightning_indexer_quant(
+                query=q_li.view(q_li_shape_ori),
+                key=kv_cache[2],
+                weights=weights,
+                query_dequant_scale=q_li_scale.view(q_li_shape_ori[:-1]),
+                key_dequant_scale=kv_cache[3].squeeze(2),
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+                block_table=attn_metadata.block_table,
+                query_quant_mode=0,
+                key_quant_mode=0,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=2048,
+                sparse_mode=3,
+            )
+        elif use_torch_npu_lightning_indexer:
+            topk_indices, _ = torch_npu.npu_lightning_indexer(
+                query=q_li,
+                key=kv_cache[2],
+                weights=weights,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+                block_table=attn_metadata.block_table,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=2048,
+                sparse_mode=3,
+            )
+        else:
+            topk_indices = torch.ops._C_ascend.npu_lightning_indexer(
+                query=q_li,
+                key=kv_cache[2],
+                weights=weights,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+                block_table=attn_metadata.block_table,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=2048,
+                sparse_mode=3,
+            )
+        return topk_indices
+
+    @staticmethod
+    def execute_sparse_flash_attention_process(
+        sfa_impl,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv_cache: tuple,
+        topk_indices: torch.Tensor,
+        attn_metadata,
+        actual_seq_lengths_query: torch.Tensor,
+        actual_seq_lengths_key: torch.Tensor,
+    ) -> torch.Tensor:
+        block_table = attn_metadata.block_table
+        kv = kv_cache[0]
+        key_rope = kv_cache[1]
+
+        attn_output = torch.ops._C_ascend.npu_sparse_flash_attention(
+            query=ql_nope,
+            key=kv,
+            value=kv,
+            sparse_indices=topk_indices,
+            scale_value=sfa_impl.scale,
+            sparse_block_size=1,
+            block_table=block_table,
+            actual_seq_lengths_query=actual_seq_lengths_query,
+            actual_seq_lengths_kv=actual_seq_lengths_key,
+            query_rope=q_pe,
+            key_rope=key_rope,
+            layout_query="TND",
+            layout_kv="PA_BSND",
+            sparse_mode=3,
+        )
+        return attn_output
+
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
     @classmethod
@@ -462,6 +703,190 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             key=key,
             value=value,
         )
+
+    @staticmethod
+    def mla_preprocess_only_decode(atten_obj, hidden_states, kv_cache, attn_metadata):
+        bsz = attn_metadata.num_decode_tokens
+        hidden_states = hidden_states[:bsz].unsqueeze(1)
+        hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=torch.float8_e4m3fn)
+        dynamic_scale = dynamic_scale.reshape(hidden_states.shape[0] * hidden_states.shape[1], -1)
+        cos_shape = attn_metadata.decode.cos.shape
+        cos = attn_metadata.decode.cos.view(cos_shape[0], 1, cos_shape[-1])
+        sin = attn_metadata.decode.sin.view(cos_shape[0], 1, cos_shape[-1])
+
+        decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
+
+        decode_q_nope, decode_q_pe, _, _, _ = torch_npu.npu_mla_prolog_v3(
+            token_x=hidden_states,
+            weight_dq=atten_obj.weight_dq,
+            weight_uq_qr=atten_obj.weight_uq_qr,
+            weight_uk=atten_obj.W_UK_T,
+            weight_dkv_kr=atten_obj.weight_dkv_kr,
+            rmsnorm_gamma_cq=atten_obj.q_a_layernorm.weight.data,
+            rmsnorm_gamma_ckv=atten_obj.kv_a_layernorm.weight.data,
+            rope_sin=sin,
+            rope_cos=cos,
+            kv_cache=decode_k_nope,
+            kr_cache=decode_k_pe,
+            cache_index=attn_metadata.slot_mapping[:bsz].view(bsz, -1).to(torch.int64),
+            dequant_scale_x=dynamic_scale.view(FLOAT8_E8M0FNU_DTYPE),
+            dequant_scale_w_dq=atten_obj.weight_dq_scale.view(FLOAT8_E8M0FNU_DTYPE),
+            dequant_scale_w_uq_qr=atten_obj.weight_uq_qr_scale.view(FLOAT8_E8M0FNU_DTYPE),
+            dequant_scale_w_dkv_kr=atten_obj.weight_dkv_kr_scale.view(FLOAT8_E8M0FNU_DTYPE),
+            cache_mode="PA_BSND",
+            query_quant_mode=0,
+            weight_quant_mode=3,
+        )
+
+        decode_q_nope = decode_q_nope.view(bsz, atten_obj.num_heads, atten_obj.kv_lora_rank)
+        decode_q_pe = decode_q_pe.view(bsz, atten_obj.num_heads, -1)
+
+        from vllm_ascend.attention.mla_v1 import DecodeMLAPreprocessResult
+
+        decode_preprocess_res = DecodeMLAPreprocessResult(decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe)
+        return decode_preprocess_res, None
+    def sfa_preprocess_with_mlapo(
+        sfa_impl,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        num_input_tokens: int,
+    ) -> tuple:
+        bsz = num_input_tokens
+        hidden_states_temp = hidden_states[:bsz].unsqueeze(1)
+        hidden_states_temp, dynamic_scale = torch_npu.npu_dynamic_mx_quant(hidden_states_temp, dst_type=torch.float8_e4m3fn)
+
+        dynamic_scale = dynamic_scale.reshape(hidden_states_temp.shape[0] * hidden_states_temp.shape[1], -1)
+        cos_shape = cos.shape
+        cos = cos.view(cos_shape[0], 1, cos_shape[-1])
+        sin = sin.view(cos_shape[0], 1, cos_shape[-1])
+
+        decode_k_nope = kv_cache[0]
+        kr_cache = torch.zeros((0, 0, decode_k_nope.shape[2], cos_shape[-1]), dtype=torch.bfloat16, device=decode_k_nope.device)
+
+        decode_q_nope, q_pe, _, q_c, q_c_scale = torch_npu.npu_mla_prolog_v3(
+            token_x=hidden_states_temp,
+            weight_dq=sfa_impl.weight_dq,
+            weight_uq_qr=sfa_impl.weight_uq_qr,
+            weight_uk=sfa_impl.W_UK_T,
+            weight_dkv_kr=sfa_impl.weight_dkv_kr,
+            rmsnorm_gamma_cq=sfa_impl.q_a_layernorm.weight.data,
+            rmsnorm_gamma_ckv=sfa_impl.kv_a_layernorm.weight.data,
+            rope_sin=sin,
+            rope_cos=cos,
+            kv_cache=decode_k_nope,
+            kr_cache=kr_cache,
+            cache_index=slot_mapping[:bsz].view(bsz, -1).to(torch.int64),
+            dequant_scale_x=dynamic_scale.view(torch.float8_e8m0fnu),
+            dequant_scale_w_dq=sfa_impl.weight_dq_scale.view(torch.float8_e8m0fnu),
+            dequant_scale_w_uq_qr=sfa_impl.weight_uq_qr_scale.view(torch.float8_e8m0fnu),
+            dequant_scale_w_dkv_kr=sfa_impl.weight_dkv_kr_scale.view(torch.float8_e8m0fnu),
+            cache_mode="PA_BSND",
+            weight_quant_mode=3,
+            kv_cache_quant_mode=3,
+            query_quant_mode=0,
+            ckvkr_repo_mode=1,
+            quant_scale_repo_mode=1,
+            query_norm_flag=True
+        )
+
+        decode_q_nope = decode_q_nope.view(bsz, sfa_impl.num_heads, sfa_impl.kv_lora_rank)
+        q_pe = q_pe.view(bsz, sfa_impl.num_heads, 64)
+
+        return hidden_states, decode_q_nope, q_pe, (q_c, q_c_scale)
+
+    @staticmethod
+    def indexer_select_post_process(
+        sfa_impl,
+        q_li: torch.Tensor,
+        q_li_scale: torch.Tensor | None,
+        q_li_shape_ori: tuple,
+        weights: torch.Tensor,
+        kv_cache: tuple,
+        attn_metadata,
+        actual_seq_lengths_query: torch.Tensor,
+        actual_seq_lengths_key: torch.Tensor,
+        use_sparse_c8_indexer: bool,
+        use_torch_npu_lightning_indexer: bool,
+    ) -> torch.Tensor:
+        if use_sparse_c8_indexer:
+            assert len(kv_cache) == 4
+            topk_indices = None
+
+            q_li_scale = q_li_scale.view(q_li_shape_ori[:-1])
+            key_dequant_scale = kv_cache[3].squeeze(2)
+
+            topk_indices = torch_npu.npu_quant_lightning_indexer(
+                query=q_li.view(q_li_shape_ori),
+                key=kv_cache[2],
+                weights=weights,
+                query_dequant_scale=q_li_scale,
+                key_dequant_scale=key_dequant_scale,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+                block_table=attn_metadata.block_table,
+                query_quant_mode=0,
+                key_quant_mode=0,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=2048,
+                sparse_mode=3,
+            )
+        else:
+            topk_indices = torch.ops._C_ascend.npu_lightning_indexer(
+                query=q_li,
+                key=kv_cache[2],
+                weights=weights,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+                block_table=attn_metadata.block_table,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=2048,
+                sparse_mode=3,
+            )
+        return topk_indices
+
+    @staticmethod
+    def execute_sparse_flash_attention_process(
+        sfa_impl,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv_cache: tuple,
+        topk_indices: torch.Tensor,
+        attn_metadata,
+        actual_seq_lengths_query: torch.Tensor,
+        actual_seq_lengths_key: torch.Tensor,
+    ) -> torch.Tensor:
+        block_table = attn_metadata.block_table
+        kv = kv_cache[0]
+        key_rope = kv_cache[1]
+
+        query = torch.cat([ql_nope, q_pe], dim=-1)
+
+        attn_output = torch_npu.npu_kv_quant_sparse_flash_attention(
+            query=query,
+            key=kv,
+            value=kv,
+            sparse_indices=topk_indices,
+            scale_value=sfa_impl.scale,
+            sparse_block_size=1,
+            block_table=block_table,
+            actual_seq_lengths_query=actual_seq_lengths_query,
+            actual_seq_lengths_kv=actual_seq_lengths_key,
+            layout_query="TND",
+            layout_kv='PA_BSND',
+            sparse_mode=3,
+            attention_mode=2,
+            quant_scale_repo_mode=1,
+            tile_size=128,
+            key_quant_mode=2,
+            value_quant_mode=2,
+            rope_head_dim=64
+        )
+        return attn_output
 
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:
