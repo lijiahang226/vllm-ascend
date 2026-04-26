@@ -35,6 +35,7 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 
 from .base import AscendLinearScheme, AscendMoEScheme, QuantType
 from .registry import register_scheme
+from vllm_ascend.utils import maybe_trans_nz
 
 
 @register_scheme("W8A8_MXFP8", "linear")
@@ -132,6 +133,8 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
 
         n_dim, k_dim = layer.weight_scale.data.shape
         layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
+        if not ("fused_qkv_a_proj" in layer.prefix or "q_b_proj" in layer.prefix):
+            layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight.data = layer.weight.data.transpose(0, 1)
         layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)
 
@@ -337,6 +340,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
         g_num, n_size, k_size = layer.w2_weight_scale.shape
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
+        layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+        layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
