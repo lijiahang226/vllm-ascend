@@ -36,6 +36,7 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 
 from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
 from .registry import register_scheme
+from vllm_ascend.utils import maybe_trans_nz
 
 
 @register_scheme("W8A8_MXFP8", "linear")
