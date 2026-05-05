@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 import vllm.model_executor.layers.attention.mla_attention
@@ -9,6 +9,16 @@ import vllm.v1.kv_cache_interface
 from typing_extensions import Self
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+
+def _get_c8_k_cache_dtype() -> torch.dtype:
+    return torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
+
+
+def _get_c8_k_scale_cache_dtype() -> torch.dtype:
+    return torch.float32 if get_ascend_device_type() == AscendDeviceType.A5 else torch.float16
 
 
 @dataclass(frozen=True)
@@ -39,8 +49,8 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
     sparse_head_dim: tuple[int, ...] | None = None
     cache_sparse_c8: bool = False
-    c8_k_cache_dtype: torch.dtype = torch.int8
-    c8_k_scale_cache_dtype: torch.dtype = torch.float16
+    c8_k_cache_dtype: torch.dtype = field(default_factory=_get_c8_k_cache_dtype)
+    c8_k_scale_cache_dtype: torch.dtype = field(default_factory=_get_c8_k_scale_cache_dtype)
 
     @property
     def page_size_bytes(self) -> int:
@@ -88,8 +98,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             factor = get_dtype_size(self.dtype) // get_dtype_size(self.c8_k_cache_dtype)
             index_k_head_dim_virtual = index_k_head_dim // factor
 
-            assert get_dtype_size(self.dtype) == get_dtype_size(self.c8_k_scale_cache_dtype)
-            index_k_scale_head_dim_virtual = 1
+            index_k_scale_head_dim_virtual = get_dtype_size(self.c8_k_scale_cache_dtype)
 
             return (
                 kv_lora_rank,
@@ -104,7 +113,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
             return (
                 total_virtual_head_dim / virtual_dims[0],  # kv_cache[0]
-                total_virtual_head_dim / virtual_dims[1],  # kv_cache[1]
+                None,  # kv_cache[1]
                 total_virtual_head_dim / virtual_dims[2],  # kv_cache[2]
                 total_virtual_head_dim / virtual_dims[3],  # kv_cache[3]
             )
