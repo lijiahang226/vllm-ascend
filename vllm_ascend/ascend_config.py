@@ -180,13 +180,9 @@ class AscendConfig:
 
         from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-        # Disable Sparse C8 for A5
-        # A5 has not been fully validated for this path and may carry hidden risks.
-        # TODO(rjg-lyh): Enable A5 support after sufficient validation.
         self.enable_sparse_c8 = (
             additional_config.get("enable_sparse_c8", False)
             and use_sparse
-            and get_ascend_device_type() != AscendDeviceType.A5
         )
         quant_config = getattr(vllm_config, "quant_config", None)
         self._sparse_c8_layer_ids, self._sparse_c8_layer_names = self._parse_sparse_c8_layers_from_quant_config(
