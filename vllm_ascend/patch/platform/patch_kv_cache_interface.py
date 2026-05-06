@@ -84,7 +84,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             - kv_cache[0]
             - kv_cache[1]
             - kv_cache[2]
-            - kv_cache[3] (None if Sparse C8 is disabled)
+            - kv_cache[3] (None if Sparse C8 is disabled or A5 device)
         """
 
         assert self.sparse_head_dim is not None
@@ -109,14 +109,27 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
         if self.cache_sparse_c8:
             virtual_dims = get_sparse_head_dim_virtual()
-            total_virtual_head_dim = sum(virtual_dims)
-
-            return (
-                total_virtual_head_dim / virtual_dims[0],  # kv_cache[0]
-                None,  # kv_cache[1]
-                total_virtual_head_dim / virtual_dims[2],  # kv_cache[2]
-                total_virtual_head_dim / virtual_dims[3],  # kv_cache[3]
-            )
+            kv_lora_rank, qk_rope_head_dim, index_k_head_dim_virtual, index_k_scale_head_dim_virtual = virtual_dims
+            
+            # A5: sparse_head_dim = (656, 0, index_head_dim), qk_rope_head_dim is 0
+            # This means kv_lora and k_rope are merged into a single tensor
+            if qk_rope_head_dim == 0:
+                total_virtual_head_dim = kv_lora_rank + index_k_head_dim_virtual + index_k_scale_head_dim_virtual
+                return (
+                    total_virtual_head_dim / kv_lora_rank,  # kv_cache[0]: merged ckv
+                    total_virtual_head_dim / index_k_head_dim_virtual,  # kv_cache[1]: qli_tensor
+                    total_virtual_head_dim / index_k_scale_head_dim_virtual,  # kv_cache[2]: qli_scale
+                    None,  # kv_cache[3] does not exist for A5
+                )
+            else:
+                # A3: sparse_head_dim = (kv_lora_rank, qk_rope_head_dim, index_head_dim)
+                total_virtual_head_dim = sum(virtual_dims)
+                return (
+                    total_virtual_head_dim / virtual_dims[0],  # kv_cache[0]
+                    total_virtual_head_dim / virtual_dims[1],  # kv_cache[1]
+                    total_virtual_head_dim / virtual_dims[2],  # kv_cache[2]
+                    total_virtual_head_dim / virtual_dims[3],  # kv_cache[3]
+                )
 
         return (
             self.head_size / self.sparse_head_dim[0],  # kv_cache[0]

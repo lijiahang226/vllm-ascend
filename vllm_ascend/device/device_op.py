@@ -837,15 +837,15 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         use_torch_npu_lightning_indexer: bool,
     ) -> torch.Tensor:
         if use_sparse_c8_indexer:
-            assert len(kv_cache) == 4
+            assert len(kv_cache) == 3
             topk_indices = None
 
             q_li_scale = q_li_scale.view(q_li_shape_ori[:-1])
-            key_dequant_scale = kv_cache[3].squeeze(2)
+            key_dequant_scale = kv_cache[2].squeeze(2)
 
             topk_indices = torch_npu.npu_quant_lightning_indexer(
                 query=q_li.view(q_li_shape_ori),
-                key=kv_cache[2],
+                key=kv_cache[1],
                 weights=weights,
                 query_dequant_scale=q_li_scale,
                 key_dequant_scale=key_dequant_scale,
