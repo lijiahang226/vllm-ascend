@@ -58,19 +58,20 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             assert self.sparse_head_dim is not None
             assert len(self.sparse_head_dim) == 3
             num_heads_per_page = self.block_size * self.num_kv_heads
-            # kv_cache[0]: bfloat16, kv_cache[1]: bfloat16
-            kv_lora_rank, qk_rope_head_dim = self.sparse_head_dim[:2]
-            k_pe_nope_bytes = num_heads_per_page * (kv_lora_rank + qk_rope_head_dim) * get_dtype_size(self.dtype)
-            # kv_cache[2]: int8
-            index_head_dim = self.sparse_head_dim[-1]
-            indexer_k_bytes = num_heads_per_page * index_head_dim * get_dtype_size(self.c8_k_cache_dtype)
-            # kv_cache[3]: float16
-            # since the scale is stored per token, head_dim is set to 1.
-            index_scale_head_dim = 1
-            indexer_k_scale_bytes = (
-                num_heads_per_page * index_scale_head_dim * get_dtype_size(self.c8_k_scale_cache_dtype)
-            )
-            return k_pe_nope_bytes + indexer_k_bytes + indexer_k_scale_bytes
+
+            kv_lora_rank, _, index_head_dim = self.sparse_head_dim
+
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                # A5 C8: ckv merged (kv_lora + k_rope) = 656, stored as f8e4m3
+                ckv_bytes = num_heads_per_page * 656 * get_dtype_size(self.c8_k_cache_dtype)
+                qli_bytes = num_heads_per_page * index_head_dim * get_dtype_size(self.c8_k_cache_dtype)
+                qli_scale_bytes = num_heads_per_page * 1 * get_dtype_size(self.c8_k_scale_cache_dtype)
+                return ckv_bytes + qli_bytes + qli_scale_bytes
+            else:
+                k_pe_nope_bytes = num_heads_per_page * (kv_lora_rank + self.sparse_head_dim[1]) * get_dtype_size(self.dtype)
+                indexer_k_bytes = num_heads_per_page * index_head_dim * get_dtype_size(self.c8_k_cache_dtype)
+                indexer_k_scale_bytes = num_heads_per_page * 1 * get_dtype_size(self.c8_k_scale_cache_dtype)
+                return k_pe_nope_bytes + indexer_k_bytes + indexer_k_scale_bytes
 
         return self.block_size * self.num_kv_heads * self.head_size * get_dtype_size(self.dtype)
 
@@ -84,39 +85,40 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             - kv_cache[0]
             - kv_cache[1]
             - kv_cache[2]
-            - kv_cache[3] (None if Sparse C8 is disabled)
+            - kv_cache[3] (None if Sparse C8 is disabled or A5 device)
         """
 
         assert self.sparse_head_dim is not None
 
-        def get_sparse_head_dim_virtual() -> tuple[int, int, int, int]:
-            assert self.sparse_head_dim is not None
-            assert self.cache_sparse_c8 is True
-
-            kv_lora_rank, qk_rope_head_dim, index_k_head_dim = self.sparse_head_dim
-
-            factor = get_dtype_size(self.dtype) // get_dtype_size(self.c8_k_cache_dtype)
-            index_k_head_dim_virtual = index_k_head_dim // factor
-
-            index_k_scale_head_dim_virtual = get_dtype_size(self.c8_k_scale_cache_dtype)
-
-            return (
-                kv_lora_rank,
-                qk_rope_head_dim,
-                index_k_head_dim_virtual,
-                index_k_scale_head_dim_virtual,
-            )
-
         if self.cache_sparse_c8:
-            virtual_dims = get_sparse_head_dim_virtual()
-            total_virtual_head_dim = sum(virtual_dims)
+            kv_lora_rank, qk_rope_head_dim, index_head_dim = self.sparse_head_dim
 
-            return (
-                total_virtual_head_dim / virtual_dims[0],  # kv_cache[0]
-                None,  # kv_cache[1]
-                total_virtual_head_dim / virtual_dims[2],  # kv_cache[2]
-                total_virtual_head_dim / virtual_dims[3],  # kv_cache[3]
-            )
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                # A5 C8: merged ckv (656) + qli + qli_scale, all in f8/fp32
+                ckv_bytes = 656 * get_dtype_size(self.c8_k_cache_dtype)
+                qli_bytes = index_head_dim * get_dtype_size(self.c8_k_cache_dtype)
+                qli_scale_bytes = 1 * get_dtype_size(self.c8_k_scale_cache_dtype)
+                total_bytes = ckv_bytes + qli_bytes + qli_scale_bytes
+
+                return (
+                    total_bytes / ckv_bytes,
+                    total_bytes / qli_bytes,
+                    total_bytes / qli_scale_bytes,
+                    None,
+                )
+            else:
+                k_bytes = kv_lora_rank * get_dtype_size(self.dtype)
+                v_bytes = qk_rope_head_dim * get_dtype_size(self.dtype)
+                qli_bytes = index_head_dim * get_dtype_size(self.c8_k_cache_dtype)
+                qli_scale_bytes = 1 * get_dtype_size(self.c8_k_scale_cache_dtype)
+                total_bytes = k_bytes + v_bytes + qli_bytes + qli_scale_bytes
+
+                return (
+                    total_bytes / k_bytes,
+                    total_bytes / v_bytes,
+                    total_bytes / qli_bytes,
+                    total_bytes / qli_scale_bytes,
+                )
 
         return (
             self.head_size / self.sparse_head_dim[0],  # kv_cache[0]

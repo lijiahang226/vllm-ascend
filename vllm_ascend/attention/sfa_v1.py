@@ -559,9 +559,11 @@ class AscendSFAImpl(MLAAttentionImpl):
                 None,
             )
             reasons = []
+            is_quantized = isinstance(quant_method, AscendW8A8LinearMethod) or isinstance(
+                quant_method, AscendW8A8MXFP8DynamicLinearMethod
+            )
             if self.fused_qkv_a_proj is None or (
-                not isinstance(quant_method, AscendW8A8LinearMethod)
-                and not isinstance(quant_method, AscendW8A8MXFP8DynamicLinearMethod)
+                not is_quantized and get_ascend_device_type() != AscendDeviceType.A5
             ):
                 reasons.append(
                     "Currently mlapo only supports W8A8 quantization in SFA scenario."
@@ -579,6 +581,12 @@ class AscendSFAImpl(MLAAttentionImpl):
                     self._process_weights_for_fused_mlapo_a5(act_dtype)
                 else:
                     self._process_weights_for_fused_mlapo(act_dtype)
+        
+        # Update c8_k_cache_dtype based on quantization status for A5 sparse C8
+        if self.use_sparse_c8_indexer and get_ascend_device_type() == AscendDeviceType.A5:
+            if hasattr(self, 'mlapo_is_quantized') and not self.mlapo_is_quantized:
+                self.c8_k_cache_dtype = act_dtype
+                self.c8_k_scale_cache_dtype = act_dtype
         if not self.enable_mlapo:
             # if mlapo, W_UK_T can't trans nz
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
@@ -691,6 +699,16 @@ class AscendSFAImpl(MLAAttentionImpl):
         weight_scale = weight_scale.reshape(-1, weight_scale.shape[1] * weight_scale.shape[2])
         self.weight_dq_scale = weight_scale[: self.q_lora_rank, ...]
         self.weight_dkv_kr_scale = weight_scale[self.q_lora_rank :, ...]
+
+    def _process_weights_for_fused_mlapo_a5_float(self, act_dtype: torch.dtype):
+        weight_dq = self.fused_qkv_a_proj.weight.data[..., : self.q_lora_rank].contiguous()
+        self.weight_dq = torch_npu.npu_format_cast(weight_dq, 29)
+
+        weight_uq_qr = self.q_proj.weight.data.contiguous()
+        self.weight_uq_qr = torch_npu.npu_format_cast(weight_uq_qr, 29)
+
+        weight_dkv_kr = self.fused_qkv_a_proj.weight.data[..., self.q_lora_rank :].contiguous()
+        self.weight_dkv_kr = torch_npu.npu_format_cast(weight_dkv_kr, 29)
 
     def forward_mha(
         self,
@@ -945,9 +963,14 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if self.use_sparse_c8_indexer:
             k_li = k_li @ AscendSFAImpl.k_hadamard
-            k_li, k_li_scale = torch_npu.npu_dynamic_quant(k_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
-            k_li_scale = k_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
-            k_li_scale = k_li_scale.unsqueeze(-1)  # [b*s,1]
+            # Only perform quantization in quantization scenario
+            # In non-quantization scenario, keep bfloat16
+            if hasattr(self, 'mlapo_is_quantized') and not self.mlapo_is_quantized:
+                k_li_scale = None
+            else:
+                k_li, k_li_scale = torch_npu.npu_dynamic_quant(k_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
+                k_li_scale = k_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
+                k_li_scale = k_li_scale.unsqueeze(-1)  # [b*s,1]
         else:
             k_li_scale = None
 
@@ -964,8 +987,14 @@ class AscendSFAImpl(MLAAttentionImpl):
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
     ):
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        x = x[:num_actual_tokens]
+        cos = cos[:num_actual_tokens]
+        sin = sin[:num_actual_tokens]
+
         kw, _ = self.wk_weights_proj(x)
         weights = kw[:, self.head_dim :]
+
         q_li, _ = self.wq_b(q_c)  # [b,s,1536] @ [1536,64*128] = [b,s,64*128]
         q_li = q_li.view(-1, self.n_head, self.head_dim)  # [n_toks,64,128]
         if HAS_TRITON:
@@ -1201,16 +1230,29 @@ class AscendSFAImpl(MLAAttentionImpl):
         if kv_cache is not None:
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event = torch.npu.Event()
+            
+            if self.use_sparse_c8_indexer and get_ascend_device_type() == AscendDeviceType.A5:
+                dsa_k_cache_idx = 1
+                dsa_k_scale_cache_idx = 2
+            else:
+                dsa_k_cache_idx = 2
+                dsa_k_scale_cache_idx = 3
+            
             torch_npu.npu_scatter_nd_update_(
-                kv_cache[2].view(-1, k_li.shape[-1]), slot_mapping.view(-1, 1), k_li.view(-1, k_li.shape[-1])
+                kv_cache[dsa_k_cache_idx].view(-1, k_li.shape[-1]),
+                slot_mapping[:attn_metadata.num_actual_tokens].view(-1, 1),
+                k_li[:attn_metadata.num_actual_tokens].view(-1, k_li.shape[-1])
             )  # b, s, n, d
             if self.use_sparse_c8_indexer:
-                assert len(kv_cache) == 4
+                if get_ascend_device_type() == AscendDeviceType.A5:
+                    assert len(kv_cache) == 3
+                else:
+                    assert len(kv_cache) == 4
                 assert k_li_scale is not None
                 torch_npu.npu_scatter_nd_update_(
-                    kv_cache[3].view(-1, k_li_scale.shape[-1]),
-                    slot_mapping.view(-1, 1),
-                    k_li_scale.view(-1, k_li_scale.shape[-1]),
+                    kv_cache[dsa_k_scale_cache_idx].view(-1, k_li_scale.shape[-1]),
+                    slot_mapping[:attn_metadata.num_actual_tokens].view(-1, 1),
+                    k_li_scale[:attn_metadata.num_actual_tokens].view(-1, k_li_scale.shape[-1]),
                 )
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
@@ -1259,7 +1301,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 return result
             attn_output = result
 
-        output[...] = self.o_proj(attn_output)[0]
+        output[:attn_metadata.num_actual_tokens] = self.o_proj(attn_output)[0]
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 

@@ -305,18 +305,11 @@ class NPUModelRunner(GPUModelRunner):
             vllm_config.model_config.hf_text_config, "index_topk"
         )
         if self.use_sparse:
-            if get_ascend_device_type() == AscendDeviceType.A5:
-                self.sparse_head_dim = (
-                    656,
-                    0,
-                    self.model_config.hf_text_config.index_head_dim,
-                )
-            else:
-                self.sparse_head_dim = (
-                    self.model_config.hf_text_config.kv_lora_rank,
-                    self.model_config.hf_text_config.qk_rope_head_dim,
-                    self.model_config.hf_text_config.index_head_dim,
-                )
+            self.sparse_head_dim = (
+                self.model_config.hf_text_config.kv_lora_rank,
+                self.model_config.hf_text_config.qk_rope_head_dim,
+                self.model_config.hf_text_config.index_head_dim,
+            )
         # dsa c8
         self.use_sparse_c8_indexer = self.ascend_config.enable_sparse_c8
         if self.use_sparse_c8_indexer:
@@ -817,6 +810,8 @@ class NPUModelRunner(GPUModelRunner):
         self.query_start_loc.np[0] = 0
         self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
         self.query_start_loc.copy_to_gpu()
+
+        self.actual_seq_lengths_q = cu_num_tokens.tolist()
 
         # Now, query_start_loc is padded.
         # But gdn needs an unpadded one.
@@ -2829,6 +2824,7 @@ class NPUModelRunner(GPUModelRunner):
             num_scheduled_tokens, self.query_pos.np)
             self.query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
             self.query_start_loc.copy_to_gpu()
+            self.actual_seq_lengths_q = cum_num_tokens.tolist()
             if self._has_gdn:
                 self.gdn_query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
                 self.gdn_query_start_loc.copy_to_gpu()
@@ -3245,10 +3241,19 @@ class NPUModelRunner(GPUModelRunner):
                         kv_cache_spec = layer_kv_cache_spec[layer_name]
                         current_sparse_c8 = kv_cache_spec_uses_sparse_c8(kv_cache_spec)
                         sparse_kv_cache_ratio = kv_cache_spec.sparse_kv_cache_ratio
-                        k_tensor_split_factor = sparse_kv_cache_ratio[0]
-                        v_tensor_split_factor = sparse_kv_cache_ratio[1]
-                        dsa_k_tensor_split_factor = sparse_kv_cache_ratio[2]
-                        dsa_k_scale_tensor_split_factor = sparse_kv_cache_ratio[3] if current_sparse_c8 else None
+                        
+                        # A5 sparse C8: (ckv_ratio, qli_ratio, qli_scale_ratio, None)
+                        # A3 sparse C8: (k_ratio, v_ratio, qli_ratio, qli_scale_ratio)
+                        if current_sparse_c8 and get_ascend_device_type() == AscendDeviceType.A5:
+                            k_tensor_split_factor = sparse_kv_cache_ratio[0]  # ckv
+                            v_tensor_split_factor = None  # A5没有独立的v_tensor
+                            dsa_k_tensor_split_factor = sparse_kv_cache_ratio[1]  # qli_tensor
+                            dsa_k_scale_tensor_split_factor = sparse_kv_cache_ratio[2]  # qli_scale
+                        else:
+                            k_tensor_split_factor = sparse_kv_cache_ratio[0]
+                            v_tensor_split_factor = sparse_kv_cache_ratio[1]
+                            dsa_k_tensor_split_factor = sparse_kv_cache_ratio[2]
+                            dsa_k_scale_tensor_split_factor = sparse_kv_cache_ratio[3] if current_sparse_c8 else None
                     else:
                         k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
                         assert k_dim > 0 and v_dim > 0
@@ -3264,9 +3269,10 @@ class NPUModelRunner(GPUModelRunner):
                             k_tensor_split_factor, v_tensor_split_factor = calc_split_factor(kv_head_dim_list)
 
                     k_tensor_size = int(kv_cache_tensor.size // k_tensor_split_factor)
-                    v_tensor_size = None
-                    if get_ascend_device_type() != AscendDeviceType.A5:
+                    if v_tensor_split_factor is not None:
                         v_tensor_size = int(kv_cache_tensor.size // v_tensor_split_factor)
+                    else:
+                        v_tensor_size = None
                     dsa_k_tensor_size = None
                     dsa_k_scale_tensor_size = None
                     #### for deepseek sparse attention
@@ -3314,9 +3320,14 @@ class NPUModelRunner(GPUModelRunner):
                         if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
                             if self.use_sparse:
                                 if current_sparse_c8:
-                                    kv_cache_raw_tensors[layer_name_inner] = (
-                                        k_tensor, v_tensor, dsa_k_tensor, dsa_k_scale_tensor
-                                    )
+                                    if get_ascend_device_type() == AscendDeviceType.A5:
+                                        kv_cache_raw_tensors[layer_name_inner] = (
+                                            k_tensor, dsa_k_tensor, dsa_k_scale_tensor
+                                        )
+                                    else:
+                                        kv_cache_raw_tensors[layer_name_inner] = (
+                                            k_tensor, v_tensor, dsa_k_tensor, dsa_k_scale_tensor
+                                        )
                                 else:
                                     kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor, dsa_k_tensor)
                             else:
@@ -3368,16 +3379,27 @@ class NPUModelRunner(GPUModelRunner):
                     if self.use_sparse and "cache_only_layers" not in layer_name:
                         current_sparse_c8 = kv_cache_spec_uses_sparse_c8(current_kv_cache_spec)
                         if current_sparse_c8:
-                            raw_k_tensor, raw_v_tensor, raw_dsa_k_tensor, raw_dsa_k_scale_tensor = kv_cache_raw_tensors[  # type: ignore
-                                layer_name]
-                            assert raw_dsa_k_tensor is not None
-                            assert raw_dsa_k_scale_tensor is not None
-                            sum_page_size_bytes = (
-                                raw_k_tensor.numel()
-                                + (0 if get_ascend_device_type() == AscendDeviceType.A5 else raw_v_tensor.numel())
-                                + raw_dsa_k_tensor.numel()
-                                + raw_dsa_k_scale_tensor.numel()
-                            )
+                            if get_ascend_device_type() == AscendDeviceType.A5:
+                                raw_k_tensor, raw_dsa_k_tensor, raw_dsa_k_scale_tensor = kv_cache_raw_tensors[  # type: ignore
+                                    layer_name]
+                                assert raw_dsa_k_tensor is not None
+                                assert raw_dsa_k_scale_tensor is not None
+                                sum_page_size_bytes = (
+                                    raw_k_tensor.numel()
+                                    + raw_dsa_k_tensor.numel()
+                                    + raw_dsa_k_scale_tensor.numel()
+                                )
+                            else:
+                                raw_k_tensor, raw_v_tensor, raw_dsa_k_tensor, raw_dsa_k_scale_tensor = kv_cache_raw_tensors[  # type: ignore
+                                    layer_name]
+                                assert raw_dsa_k_tensor is not None
+                                assert raw_dsa_k_scale_tensor is not None
+                                sum_page_size_bytes = (
+                                    raw_k_tensor.numel()
+                                    + raw_v_tensor.numel()
+                                    + raw_dsa_k_tensor.numel()
+                                    + raw_dsa_k_scale_tensor.numel()
+                                )
                         else:
                             raw_k_tensor, raw_v_tensor, raw_dsa_k_tensor = kv_cache_raw_tensors[  # type: ignore
                                 layer_name]
@@ -3410,8 +3432,6 @@ class NPUModelRunner(GPUModelRunner):
                         ]
                         sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
                     assert raw_k_tensor is not None
-                    if get_ascend_device_type() != AscendDeviceType.A5:
-                        assert raw_v_tensor is not None
                     assert sum_page_size_bytes % current_kv_cache_spec.page_size_bytes == 0
                     num_blocks = sum_page_size_bytes // current_kv_cache_spec.page_size_bytes
 
@@ -3476,8 +3496,15 @@ class NPUModelRunner(GPUModelRunner):
                             mla_num_blocks,
                             mla_block_size,
                             num_kv_heads,
-                            656 if get_ascend_device_type() == AscendDeviceType.A5 else k_dim,
+                            k_dim,
                         )
+                        if self.use_sparse and current_sparse_c8 and get_ascend_device_type() == AscendDeviceType.A5:
+                            k_shape = (
+                                mla_num_blocks,
+                                mla_block_size,
+                                num_kv_heads,
+                                656,
+                            )
                         v_shape = (
                             mla_num_blocks,
                             mla_block_size,
@@ -3489,11 +3516,20 @@ class NPUModelRunner(GPUModelRunner):
                         k_cache_dtype, v_cache_dtype = self.vllm_config.quant_config.get_kv_quant_dtype(
                             layer_name, current_kv_cache_spec.dtype, self.model_config
                         )
+                    
+                    # A5 sparse C8: ckv uses float8_e4m3fn only in quantization scenario
+                    # In non-quantization scenario, use bfloat16
+                    if self.use_sparse and current_sparse_c8 and get_ascend_device_type() == AscendDeviceType.A5:
+                        if enable_fa_quant(self.vllm_config, layer_name):
+                            k_cache_dtype = self.c8_k_cache_dtype
+                        else:
+                            k_cache_dtype = current_kv_cache_spec.dtype
+                    
                     k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape)
-                    if get_ascend_device_type() != AscendDeviceType.A5:
-                        v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape)
-                    else:
+                    if self.use_sparse and current_sparse_c8 and get_ascend_device_type() == AscendDeviceType.A5:
                         v_cache = None
+                    else:
+                        v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape)
 
                     if self.use_sparse:
                         dsa_k_cache_shape = (
@@ -3503,8 +3539,9 @@ class NPUModelRunner(GPUModelRunner):
                             self.model_config.hf_text_config.index_head_dim,
                         )
                         if current_sparse_c8:
-                            # dsa_k
-                            dsa_k_cache = raw_dsa_k_tensor.view(self.c8_k_cache_dtype).view(dsa_k_cache_shape)
+                            # dsa_k: use float8_e4m3fn only in quantization scenario, otherwise use bfloat16
+                            dsa_k_cache_dtype = self.c8_k_cache_dtype if enable_fa_quant(self.vllm_config, layer_name) else current_kv_cache_spec.dtype
+                            dsa_k_cache = raw_dsa_k_tensor.view(dsa_k_cache_dtype).view(dsa_k_cache_shape)
                             # dsa_k_scale
                             dsa_k_scale_cache_shape = (
                                 num_blocks,
@@ -3518,7 +3555,12 @@ class NPUModelRunner(GPUModelRunner):
                                 .view(self.c8_k_scale_cache_dtype)
                                 .view(dsa_k_scale_cache_shape)
                             )
-                            kv_caches[layer_name] = (k_cache, v_cache, dsa_k_cache, dsa_k_scale_cache)
+                            if get_ascend_device_type() == AscendDeviceType.A5:
+                                kv_caches[layer_name] = (k_cache, dsa_k_cache, dsa_k_scale_cache)
+                            elif v_cache is not None:
+                                kv_caches[layer_name] = (k_cache, v_cache, dsa_k_cache, dsa_k_scale_cache)
+                            else:
+                                kv_caches[layer_name] = (k_cache, dsa_k_cache, dsa_k_scale_cache)
                         else:
                             # dsa_k
                             dsa_k_cache = raw_dsa_k_tensor.view(current_kv_cache_spec.dtype).view(dsa_k_cache_shape)
@@ -3805,7 +3847,7 @@ class NPUModelRunner(GPUModelRunner):
                         num_kv_heads=1,
                         head_size=sum(self.sparse_head_dim),
                         sparse_head_dim=self.sparse_head_dim,
-                        dtype=torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else self.kv_cache_dtype,
+                        dtype=self.kv_cache_dtype,
                         cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
                         cache_sparse_c8=self.ascend_config.is_sparse_c8_layer(layer_name),
                     )

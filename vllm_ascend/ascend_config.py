@@ -178,8 +178,6 @@ class AscendConfig:
                     "enable_kv_nz is only supported in pd scenario and can only be used in D node."
                 )
 
-        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
-
         self.enable_sparse_c8 = (
             additional_config.get("enable_sparse_c8", False)
             and use_sparse
@@ -259,15 +257,19 @@ class AscendConfig:
 
         layer_ids: set[int] = set()
         layer_names: set[str] = set()
-        suffix = ".indexer.quant_type"
+        suffix = ".indexer.quant_type" 
+        A5_suffix = ".indexer.wq_b_weight"
         from vllm.model_executor.models.utils import extract_layer_index
 
         for key, value in quant_description.items():
-            if not isinstance(key, str) or not key.endswith(suffix):
+            if not isinstance(key, str) or (not key.endswith(suffix) and not key.endswith(A5_suffix)):
                 continue
-            if value != "INT8_DYNAMIC":
+            if value not in ("INT8_DYNAMIC", "W8A8_MXFP8") :
                 continue
-            layer_name = key[: -len(suffix)].rstrip(".")
+            if key.endswith(suffix):
+                layer_name = key[: -len(suffix)].rstrip(".")
+            else:
+                layer_name = key[: -len(A5_suffix)].rstrip(".")
             if not layer_name:
                 continue
             layer_names.add(layer_name)
