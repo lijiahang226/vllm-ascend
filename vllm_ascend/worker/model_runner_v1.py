@@ -3530,6 +3530,11 @@ class NPUModelRunner(GPUModelRunner):
                         k_cache_dtype, v_cache_dtype = self.vllm_config.quant_config.get_kv_quant_dtype(
                             layer_name, current_kv_cache_spec.dtype, self.model_config
                         )
+                    
+                    # A5 sparse C8: ckv uses float8_e4m3fn
+                    if self.use_sparse and current_sparse_c8 and get_ascend_device_type() == AscendDeviceType.A5:
+                        k_cache_dtype = self.c8_k_cache_dtype
+                    
                     k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape)
                     if not (self.use_sparse and current_sparse_c8 and get_ascend_device_type() == AscendDeviceType.A5):
                         if v_cache is not None:
