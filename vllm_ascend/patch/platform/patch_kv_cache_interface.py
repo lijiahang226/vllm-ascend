@@ -58,19 +58,27 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             assert self.sparse_head_dim is not None
             assert len(self.sparse_head_dim) == 3
             num_heads_per_page = self.block_size * self.num_kv_heads
-            # kv_cache[0]: bfloat16, kv_cache[1]: bfloat16
-            kv_lora_rank, qk_rope_head_dim = self.sparse_head_dim[:2]
-            k_pe_nope_bytes = num_heads_per_page * (kv_lora_rank + qk_rope_head_dim) * get_dtype_size(self.dtype)
-            # kv_cache[2]: int8
-            index_head_dim = self.sparse_head_dim[-1]
-            indexer_k_bytes = num_heads_per_page * index_head_dim * get_dtype_size(self.c8_k_cache_dtype)
-            # kv_cache[3]: float16
-            # since the scale is stored per token, head_dim is set to 1.
-            index_scale_head_dim = 1
-            indexer_k_scale_bytes = (
-                num_heads_per_page * index_scale_head_dim * get_dtype_size(self.c8_k_scale_cache_dtype)
-            )
-            return k_pe_nope_bytes + indexer_k_bytes + indexer_k_scale_bytes
+            
+            kv_lora_rank, qk_rope_head_dim, index_head_dim = self.sparse_head_dim
+            
+            # A5: qk_rope_head_dim == 0 means kv_lora and k_rope are merged
+            if qk_rope_head_dim == 0:
+                # A5: ckv (merged kv_lora + k_rope)
+                ckv_bytes = num_heads_per_page * kv_lora_rank * get_dtype_size(self.dtype)
+                # qli_tensor
+                qli_bytes = num_heads_per_page * index_head_dim * get_dtype_size(self.c8_k_cache_dtype)
+                # qli_scale (per token, so head_dim is 1)
+                qli_scale_bytes = num_heads_per_page * 1 * get_dtype_size(self.c8_k_scale_cache_dtype)
+                return ckv_bytes + qli_bytes + qli_scale_bytes
+            else:
+                # A3: separate kv_lora and k_rope
+                k_pe_nope_bytes = num_heads_per_page * (kv_lora_rank + qk_rope_head_dim) * get_dtype_size(self.dtype)
+                indexer_k_bytes = num_heads_per_page * index_head_dim * get_dtype_size(self.c8_k_cache_dtype)
+                index_scale_head_dim = 1
+                indexer_k_scale_bytes = (
+                    num_heads_per_page * index_scale_head_dim * get_dtype_size(self.c8_k_scale_cache_dtype)
+                )
+                return k_pe_nope_bytes + indexer_k_bytes + indexer_k_scale_bytes
 
         return self.block_size * self.num_kv_heads * self.head_size * get_dtype_size(self.dtype)
 
@@ -89,46 +97,36 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
         assert self.sparse_head_dim is not None
 
-        def get_sparse_head_dim_virtual() -> tuple[int, int, int, int]:
-            assert self.sparse_head_dim is not None
-            assert self.cache_sparse_c8 is True
-
-            kv_lora_rank, qk_rope_head_dim, index_k_head_dim = self.sparse_head_dim
-
-            factor = get_dtype_size(self.dtype) // get_dtype_size(self.c8_k_cache_dtype)
-            index_k_head_dim_virtual = index_k_head_dim // factor
-
-            index_k_scale_head_dim_virtual = get_dtype_size(self.c8_k_scale_cache_dtype)
-
-            return (
-                kv_lora_rank,
-                qk_rope_head_dim,
-                index_k_head_dim_virtual,
-                index_k_scale_head_dim_virtual,
-            )
+        kv_lora_rank, qk_rope_head_dim, index_head_dim = self.sparse_head_dim
 
         if self.cache_sparse_c8:
-            virtual_dims = get_sparse_head_dim_virtual()
-            kv_lora_rank, qk_rope_head_dim, index_k_head_dim_virtual, index_k_scale_head_dim_virtual = virtual_dims
-            
-            # A5: sparse_head_dim = (656, 0, index_head_dim), qk_rope_head_dim is 0
-            # This means kv_lora and k_rope are merged into a single tensor
+            # A5: qk_rope_head_dim == 0 means kv_lora and k_rope are merged
             if qk_rope_head_dim == 0:
-                total_virtual_head_dim = kv_lora_rank + index_k_head_dim_virtual + index_k_scale_head_dim_virtual
+                # Calculate actual bytes for each tensor
+                ckv_bytes = kv_lora_rank * get_dtype_size(self.dtype)
+                qli_bytes = index_head_dim * get_dtype_size(self.c8_k_cache_dtype)
+                qli_scale_bytes = 1 * get_dtype_size(self.c8_k_scale_cache_dtype)
+                total_bytes = ckv_bytes + qli_bytes + qli_scale_bytes
+
                 return (
-                    total_virtual_head_dim / kv_lora_rank,  # kv_cache[0]: merged ckv
-                    total_virtual_head_dim / index_k_head_dim_virtual,  # kv_cache[1]: qli_tensor
-                    total_virtual_head_dim / index_k_scale_head_dim_virtual,  # kv_cache[2]: qli_scale
+                    total_bytes / ckv_bytes,  # kv_cache[0]: ckv
+                    total_bytes / qli_bytes,  # kv_cache[1]: qli_tensor
+                    total_bytes / qli_scale_bytes,  # kv_cache[2]: qli_scale
                     None,  # kv_cache[3] does not exist for A5
                 )
             else:
-                # A3: sparse_head_dim = (kv_lora_rank, qk_rope_head_dim, index_head_dim)
-                total_virtual_head_dim = sum(virtual_dims)
+                # A3: separate kv_lora and k_rope
+                k_bytes = kv_lora_rank * get_dtype_size(self.dtype)
+                v_bytes = qk_rope_head_dim * get_dtype_size(self.dtype)
+                qli_bytes = index_head_dim * get_dtype_size(self.c8_k_cache_dtype)
+                qli_scale_bytes = 1 * get_dtype_size(self.c8_k_scale_cache_dtype)
+                total_bytes = k_bytes + v_bytes + qli_bytes + qli_scale_bytes
+
                 return (
-                    total_virtual_head_dim / virtual_dims[0],  # kv_cache[0]
-                    total_virtual_head_dim / virtual_dims[1],  # kv_cache[1]
-                    total_virtual_head_dim / virtual_dims[2],  # kv_cache[2]
-                    total_virtual_head_dim / virtual_dims[3],  # kv_cache[3]
+                    total_bytes / k_bytes,  # kv_cache[0]
+                    total_bytes / v_bytes,  # kv_cache[1]
+                    total_bytes / qli_bytes,  # kv_cache[2]
+                    total_bytes / qli_scale_bytes,  # kv_cache[3]
                 )
 
         return (
