@@ -88,7 +88,7 @@ def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num
             # if not moe_config.supports_eplb:
             #     raise ValueError("Eplb supports only w8a8_dynamic quantization.")
         else:
-            eplb_enable = False
+            n_redundant = eplb_config.num_redundant_experts
     elif not eplb_enable:
         _, expert_map, _ = determine_expert_map(ep_size, moe_config.ep_rank, n_experts)
         return None, expert_map, None, 0
