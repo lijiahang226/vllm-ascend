@@ -3255,10 +3255,19 @@ class NPUModelRunner(GPUModelRunner):
                         kv_cache_spec = layer_kv_cache_spec[layer_name]
                         current_sparse_c8 = kv_cache_spec_uses_sparse_c8(kv_cache_spec)
                         sparse_kv_cache_ratio = kv_cache_spec.sparse_kv_cache_ratio
-                        k_tensor_split_factor = sparse_kv_cache_ratio[0]
-                        v_tensor_split_factor = sparse_kv_cache_ratio[1]
-                        dsa_k_tensor_split_factor = sparse_kv_cache_ratio[2]
-                        dsa_k_scale_tensor_split_factor = sparse_kv_cache_ratio[3] if current_sparse_c8 else None
+                        
+                        # A5 sparse C8: (ckv_ratio, qli_ratio, qli_scale_ratio, None)
+                        # A3 sparse C8: (k_ratio, v_ratio, qli_ratio, qli_scale_ratio)
+                        if current_sparse_c8 and get_ascend_device_type() == AscendDeviceType.A5:
+                            k_tensor_split_factor = sparse_kv_cache_ratio[0]  # ckv
+                            v_tensor_split_factor = None  # A5没有独立的v_tensor
+                            dsa_k_tensor_split_factor = sparse_kv_cache_ratio[1]  # qli_tensor
+                            dsa_k_scale_tensor_split_factor = sparse_kv_cache_ratio[2]  # qli_scale
+                        else:
+                            k_tensor_split_factor = sparse_kv_cache_ratio[0]
+                            v_tensor_split_factor = sparse_kv_cache_ratio[1]
+                            dsa_k_tensor_split_factor = sparse_kv_cache_ratio[2]
+                            dsa_k_scale_tensor_split_factor = sparse_kv_cache_ratio[3] if current_sparse_c8 else None
                     else:
                         k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
                         assert k_dim > 0 and v_dim > 0
