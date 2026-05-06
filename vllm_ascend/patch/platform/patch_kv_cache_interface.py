@@ -64,7 +64,9 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             # A5: qk_rope_head_dim == 0 means kv_lora and k_rope are merged
             if qk_rope_head_dim == 0:
                 # A5: ckv (merged kv_lora + k_rope)
-                ckv_bytes = num_heads_per_page * kv_lora_rank * get_dtype_size(self.dtype)
+                # A5 sparse C8: ckv uses float8_e4m3fn, not bfloat16
+                ckv_dtype = self.c8_k_cache_dtype if self.cache_sparse_c8 else self.dtype
+                ckv_bytes = num_heads_per_page * kv_lora_rank * get_dtype_size(ckv_dtype)
                 # qli_tensor
                 qli_bytes = num_heads_per_page * index_head_dim * get_dtype_size(self.c8_k_cache_dtype)
                 # qli_scale (per token, so head_dim is 1)
@@ -103,7 +105,8 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             # A5: qk_rope_head_dim == 0 means kv_lora and k_rope are merged
             if qk_rope_head_dim == 0:
                 # Calculate actual bytes for each tensor
-                ckv_bytes = kv_lora_rank * get_dtype_size(self.dtype)
+                # A5 sparse C8: ckv uses float8_e4m3fn
+                ckv_bytes = kv_lora_rank * get_dtype_size(self.c8_k_cache_dtype)
                 qli_bytes = index_head_dim * get_dtype_size(self.c8_k_cache_dtype)
                 qli_scale_bytes = 1 * get_dtype_size(self.c8_k_scale_cache_dtype)
                 total_bytes = ckv_bytes + qli_bytes + qli_scale_bytes
