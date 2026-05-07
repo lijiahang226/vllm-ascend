@@ -559,15 +559,11 @@ class AscendSFAImpl(MLAAttentionImpl):
                 None,
             )
             reasons = []
-            if self.fused_qkv_a_proj is None or (
-                not isinstance(quant_method, AscendW8A8LinearMethod)
-                and not isinstance(quant_method, AscendW8A8MXFP8DynamicLinearMethod)
-            ):
-                reasons.append(
-                    "Currently mlapo only supports W8A8 quantization in SFA scenario."
-                    "Some layers in your model are not quantized with W8A8,"
-                    "thus mlapo is disabled for these layers."
-                )
+            is_quantized = isinstance(quant_method, AscendW8A8LinearMethod) or isinstance(
+                quant_method, AscendW8A8MXFP8DynamicLinearMethod
+            )
+            if self.fused_qkv_a_proj is None:
+                reasons.append("fused_qkv_a_proj is None, mlapo is disabled.")
             if self.enable_dsa_cp:
                 reasons.append("Currently mlapo does not support SFA with CP,thus mlapo is disabled for these layers.")
             if reasons:
@@ -575,8 +571,12 @@ class AscendSFAImpl(MLAAttentionImpl):
                 for msg in reasons:
                     logger.warning_once(msg)
             else:
+                self.mlapo_is_quantized = is_quantized
                 if get_ascend_device_type() == AscendDeviceType.A5:
-                    self._process_weights_for_fused_mlapo_a5(act_dtype)
+                    if is_quantized:
+                        self._process_weights_for_fused_mlapo_a5(act_dtype)
+                    else:
+                        self._process_weights_for_fused_mlapo_a5_float(act_dtype)
                 else:
                     self._process_weights_for_fused_mlapo(act_dtype)
         if not self.enable_mlapo:
@@ -691,6 +691,16 @@ class AscendSFAImpl(MLAAttentionImpl):
         weight_scale = weight_scale.reshape(-1, weight_scale.shape[1] * weight_scale.shape[2])
         self.weight_dq_scale = weight_scale[: self.q_lora_rank, ...]
         self.weight_dkv_kr_scale = weight_scale[self.q_lora_rank :, ...]
+
+    def _process_weights_for_fused_mlapo_a5_float(self, act_dtype: torch.dtype):
+        weight_dq = self.fused_qkv_a_proj.weight.data[..., : self.q_lora_rank].contiguous()
+        self.weight_dq = torch_npu.npu_format_cast(weight_dq, 29)
+
+        weight_uq_qr = self.q_proj.weight.data.contiguous()
+        self.weight_uq_qr = torch_npu.npu_format_cast(weight_uq_qr, 29)
+
+        weight_dkv_kr = self.fused_qkv_a_proj.weight.data[..., self.q_lora_rank :].contiguous()
+        self.weight_dkv_kr = torch_npu.npu_format_cast(weight_dkv_kr, 29)
 
     def forward_mha(
         self,
