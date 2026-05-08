@@ -890,6 +890,45 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
         query = torch.cat([ql_nope, q_pe], dim=-1)
 
+        # Debug: Save inputs for qsfa operator
+        try:
+            import torch.distributed as dist
+            rank = dist.get_rank() if dist.is_initialized() else 0
+            import os
+            import time
+            
+            debug_dir = "/tmp/qsfa_debug"
+            os.makedirs(debug_dir, exist_ok=True)
+            
+            filename = f"{debug_dir}/qsfa_inputs_rank{rank}.pt"
+            
+            debug_data = {
+                'query': query,
+                'key': kv,
+                'value': kv,
+                'sparse_indices': topk_indices,
+                'block_table': block_table,
+                'actual_seq_lengths_query': actual_seq_lengths_query,
+                'actual_seq_lengths_kv': actual_seq_lengths_key,
+                'scale_value': sfa_impl.scale,
+                'sparse_block_size': 1,
+                'layout_query': "TND",
+                'layout_kv': "PA_BSND",
+                'sparse_mode': 3,
+                'attention_mode': 2,
+                'quant_scale_repo_mode': 1,
+                'tile_size': 128,
+                'key_quant_mode': 2,
+                'value_quant_mode': 2,
+                'rope_head_dim': 64,
+                'kv_cache_len': len(kv_cache),
+            }
+            
+            torch.save(debug_data, filename)
+            print(f"[Rank {rank}] Saved qsfa inputs to {filename}")
+        except Exception as e:
+            print(f"[Rank {rank if 'rank' in dir() else 0}] Failed to save qsfa inputs: {e}")
+
         attn_output = torch_npu.npu_kv_quant_sparse_flash_attention(
             query=query,
             key=kv,
