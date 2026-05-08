@@ -892,6 +892,27 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
         # Debug: Save inputs for qsfa operator
         try:
+            attn_output = torch_npu.npu_kv_quant_sparse_flash_attention(
+                query=query,
+                key=kv,
+                value=kv,
+                sparse_indices=topk_indices,
+                scale_value=sfa_impl.scale,
+                sparse_block_size=1,
+                block_table=block_table,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_kv=actual_seq_lengths_key,
+                layout_query="TND",
+                layout_kv='PA_BSND',
+                sparse_mode=3,
+                attention_mode=2,
+                quant_scale_repo_mode=1,
+                tile_size=128,
+                key_quant_mode=2,
+                value_quant_mode=2,
+                rope_head_dim=64
+            )
+        except Exception as e:
             import torch.distributed as dist
             rank = dist.get_rank() if dist.is_initialized() else 0
             import os
@@ -926,29 +947,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             
             torch.save(debug_data, filename)
             print(f"[Rank {rank}] Saved qsfa inputs to {filename}")
-        except Exception as e:
-            print(f"[Rank {rank if 'rank' in dir() else 0}] Failed to save qsfa inputs: {e}")
 
-        attn_output = torch_npu.npu_kv_quant_sparse_flash_attention(
-            query=query,
-            key=kv,
-            value=kv,
-            sparse_indices=topk_indices,
-            scale_value=sfa_impl.scale,
-            sparse_block_size=1,
-            block_table=block_table,
-            actual_seq_lengths_query=actual_seq_lengths_query,
-            actual_seq_lengths_kv=actual_seq_lengths_key,
-            layout_query="TND",
-            layout_kv='PA_BSND',
-            sparse_mode=3,
-            attention_mode=2,
-            quant_scale_repo_mode=1,
-            tile_size=128,
-            key_quant_mode=2,
-            value_quant_mode=2,
-            rope_head_dim=64
-        )
         return attn_output
 
     def npu_flash_attention(query, key, value, seq_lens_cpu, head_num, scale_value, num_kv_heads):
