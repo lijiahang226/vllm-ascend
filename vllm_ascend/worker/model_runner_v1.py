@@ -3428,13 +3428,9 @@ class NPUModelRunner(GPUModelRunner):
                             layer_name, current_kv_cache_spec.dtype, self.model_config
                         )
                     
-                    # A5 sparse C8: ckv uses float8_e4m3fn only in quantization scenario
-                    # In non-quantization scenario, use bfloat16
+                    # A5 sparse C8: ckv uses float8_e4m3fn
                     if self.use_sparse and current_sparse_c8 and get_ascend_device_type() == AscendDeviceType.A5:
-                        if enable_fa_quant(self.vllm_config, layer_name):
-                            k_cache_dtype = self.c8_k_cache_dtype
-                        else:
-                            k_cache_dtype = current_kv_cache_spec.dtype
+                        k_cache_dtype = self.c8_k_cache_dtype
                     
                     k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape)
                     if not (self.use_sparse and current_sparse_c8 and get_ascend_device_type() == AscendDeviceType.A5):
@@ -3453,9 +3449,8 @@ class NPUModelRunner(GPUModelRunner):
                             self.model_config.hf_text_config.index_head_dim,
                         )
                         if current_sparse_c8:
-                            # dsa_k: use float8_e4m3fn only in quantization scenario, otherwise use bfloat16
-                            dsa_k_cache_dtype = self.c8_k_cache_dtype if enable_fa_quant(self.vllm_config, layer_name) else current_kv_cache_spec.dtype
-                            dsa_k_cache = raw_dsa_k_tensor.view(dsa_k_cache_dtype).view(dsa_k_cache_shape)
+                            # dsa_k
+                            dsa_k_cache = raw_dsa_k_tensor.view(self.c8_k_cache_dtype).view(dsa_k_cache_shape)
                             # dsa_k_scale
                             dsa_k_scale_cache_shape = (
                                 num_blocks,
