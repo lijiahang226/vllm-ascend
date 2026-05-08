@@ -579,6 +579,12 @@ class AscendSFAImpl(MLAAttentionImpl):
                         self._process_weights_for_fused_mlapo_a5_float(act_dtype)
                 else:
                     self._process_weights_for_fused_mlapo(act_dtype)
+        
+        # Update c8_k_cache_dtype based on quantization status for A5 sparse C8
+        if self.use_sparse_c8_indexer and get_ascend_device_type() == AscendDeviceType.A5:
+            if hasattr(self, 'mlapo_is_quantized') and not self.mlapo_is_quantized:
+                self.c8_k_cache_dtype = act_dtype
+                self.c8_k_scale_cache_dtype = act_dtype
         if not self.enable_mlapo:
             # if mlapo, W_UK_T can't trans nz
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
@@ -955,9 +961,14 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if self.use_sparse_c8_indexer:
             k_li = k_li @ AscendSFAImpl.k_hadamard
-            k_li, k_li_scale = torch_npu.npu_dynamic_quant(k_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
-            k_li_scale = k_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
-            k_li_scale = k_li_scale.unsqueeze(-1)  # [b*s,1]
+            # Only perform quantization in quantization scenario
+            # In non-quantization scenario, keep bfloat16
+            if hasattr(self, 'mlapo_is_quantized') and not self.mlapo_is_quantized:
+                k_li_scale = None
+            else:
+                k_li, k_li_scale = torch_npu.npu_dynamic_quant(k_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
+                k_li_scale = k_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
+                k_li_scale = k_li_scale.unsqueeze(-1)  # [b*s,1]
         else:
             k_li_scale = None
 
