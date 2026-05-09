@@ -559,10 +559,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                 None,
             )
             reasons = []
-            if self.fused_qkv_a_proj is None or (
-                not isinstance(quant_method, AscendW8A8LinearMethod)
-                and not isinstance(quant_method, AscendW8A8MXFP8DynamicLinearMethod)
-            ):
+            is_quantized = isinstance(quant_method, AscendW8A8LinearMethod) or isinstance(
+                quant_method, AscendW8A8MXFP8DynamicLinearMethod
+            )
+            if self.fused_qkv_a_proj is None or not is_quantized:
                 reasons.append(
                     "Currently mlapo only supports W8A8 quantization in SFA scenario."
                     "Some layers in your model are not quantized with W8A8,"
@@ -575,8 +575,12 @@ class AscendSFAImpl(MLAAttentionImpl):
                 for msg in reasons:
                     logger.warning_once(msg)
             else:
+                self.mlapo_is_quantized = is_quantized
                 if get_ascend_device_type() == AscendDeviceType.A5:
-                    self._process_weights_for_fused_mlapo_a5(act_dtype)
+                    if is_quantized:
+                        self._process_weights_for_fused_mlapo_a5(act_dtype)
+                    else:
+                        self._process_weights_for_fused_mlapo_a5_float(act_dtype)
                 else:
                     self._process_weights_for_fused_mlapo(act_dtype)
         if not self.enable_mlapo:
@@ -691,6 +695,19 @@ class AscendSFAImpl(MLAAttentionImpl):
         weight_scale = weight_scale.reshape(-1, weight_scale.shape[1] * weight_scale.shape[2])
         self.weight_dq_scale = weight_scale[: self.q_lora_rank, ...]
         self.weight_dkv_kr_scale = weight_scale[self.q_lora_rank :, ...]
+
+    def _process_weights_for_fused_mlapo_a5_float(self, act_dtype: torch.dtype):
+        weight_dq = self.fused_qkv_a_proj.weight.data[..., : self.q_lora_rank].contiguous()
+        self.weight_dq_cpu = weight_dq.cpu()
+        self.weight_dq = torch_npu.npu_format_cast(weight_dq, 29)
+
+        weight_uq_qr = self.q_proj.weight.data.contiguous()
+        self.weight_uq_qr_cpu = weight_uq_qr.cpu()
+        self.weight_uq_qr = torch_npu.npu_format_cast(weight_uq_qr, 29)
+
+        weight_dkv_kr = self.fused_qkv_a_proj.weight.data[..., self.q_lora_rank :].contiguous()
+        self.weight_dkv_kr_cpu = weight_dkv_kr.cpu()
+        self.weight_dkv_kr = torch_npu.npu_format_cast(weight_dkv_kr, 29)
 
     def forward_mha(
         self,
@@ -1210,7 +1227,9 @@ class AscendSFAImpl(MLAAttentionImpl):
                 dsa_k_scale_cache_idx = 3
             
             torch_npu.npu_scatter_nd_update_(
-                kv_cache[dsa_k_cache_idx].view(-1, k_li.shape[-1]), slot_mapping.view(-1, 1), k_li.view(-1, k_li.shape[-1])
+                kv_cache[dsa_k_cache_idx].view(-1, k_li.shape[-1]),
+                slot_mapping[:attn_metadata.num_actual_tokens].view(-1, 1),
+                k_li[:attn_metadata.num_actual_tokens].view(-1, k_li.shape[-1])
             )  # b, s, n, d
             if self.use_sparse_c8_indexer:
                 if get_ascend_device_type() == AscendDeviceType.A5:
@@ -1220,8 +1239,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 assert k_li_scale is not None
                 torch_npu.npu_scatter_nd_update_(
                     kv_cache[dsa_k_scale_cache_idx].view(-1, k_li_scale.shape[-1]),
-                    slot_mapping.view(-1, 1),
-                    k_li_scale.view(-1, k_li_scale.shape[-1]),
+                    slot_mapping[:attn_metadata.num_actual_tokens].view(-1, 1),
+                    k_li_scale[:attn_metadata.num_actual_tokens].view(-1, k_li_scale.shape[-1]),
                 )
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
