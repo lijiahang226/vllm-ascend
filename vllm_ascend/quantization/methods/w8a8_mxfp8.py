@@ -80,13 +80,13 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             if x.dim() > 2:
                 x = x.view(-1, x.shape[-1])
             if get_ascend_device_type() == AscendDeviceType.A5:
-                check_nan(x, "W8A8_MXFP8 linear input x", "")
+                check_nan(x, "W8A8_MXFP8 linear input x", layer.prefix)
             quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
             if get_ascend_device_type() == AscendDeviceType.A5:
-                check_nan(quantized_x, "W8A8_MXFP8 linear quantized_x", "")
-                check_nan(dynamic_scale, "W8A8_MXFP8 linear dynamic_scale", "")
-                check_nan(layer.weight, "W8A8_MXFP8 linear weight", "")
-                check_nan(layer.weight_scale, "W8A8_MXFP8 linear weight_scale", "")
+                check_nan(quantized_x, "W8A8_MXFP8 linear quantized_x", layer.prefix)
+                check_nan(dynamic_scale, "W8A8_MXFP8 linear dynamic_scale", layer.prefix)
+                check_nan(layer.weight, "W8A8_MXFP8 linear weight", layer.prefix)
+                check_nan(layer.weight_scale, "W8A8_MXFP8 linear weight_scale", layer.prefix)
             output_dtype = x.dtype
         else:
             original_shape = x[0].shape
@@ -110,7 +110,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             group_sizes=[1, 1, self.group_size],
         )
         if get_ascend_device_type() == AscendDeviceType.A5:
-            check_nan(output, "W8A8_MXFP8 linear output", "")
+            check_nan(output, "W8A8_MXFP8 linear output", layer.prefix)
         # reshape output for Qwen VL models
         if len(original_shape) > 2:
             output = output.view(*original_shape[:-1], -1)
@@ -265,7 +265,12 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         apply_router_weight_on_input: bool = False,
         mc2_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        from vllm_ascend.utils_debug import check_nan
+        from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType
+
         assert router_logits.shape[1] == num_experts, "Number of global experts mismatch (excluding redundancy)"
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            check_nan(x, "W8A8_MXFP8 MoE input x", layer.prefix)
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
