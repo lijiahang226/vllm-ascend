@@ -796,6 +796,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             )
             dynamic_scale = dynamic_scale.reshape(hidden_states_temp.shape[0] * hidden_states_temp.shape[1], -1)
 
+            use_per_tile_kv_cache = getattr(sfa_impl, 'use_sparse_c8_indexer', False)
+
             decode_q_nope, q_pe, _, q_c, q_c_scale = torch_npu.npu_mla_prolog_v3(
                 token_x=hidden_states_temp,
                 weight_dq=sfa_impl.weight_dq,
@@ -815,10 +817,10 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 dequant_scale_w_dkv_kr=sfa_impl.weight_dkv_kr_scale.view(torch.float8_e8m0fnu),
                 cache_mode="PA_BSND",
                 weight_quant_mode=3,
-                kv_cache_quant_mode=3,
+                kv_cache_quant_mode=3 if use_per_tile_kv_cache else 0,
                 query_quant_mode=0,
-                ckvkr_repo_mode=1,
-                quant_scale_repo_mode=1,
+                ckvkr_repo_mode=1 if use_per_tile_kv_cache else 0,
+                quant_scale_repo_mode=1 if use_per_tile_kv_cache else 0,
                 query_norm_flag=True
             )
         else:
