@@ -1075,6 +1075,10 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         # run mlapo ops when dsa-cp is disabled, and ensure that num_tokens satisfies the count limitation
         if self.enable_mlapo:
+            from vllm_ascend.utils_debug import check_nan
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                check_nan(hidden_states, "hidden_states before mlapo", layer_name)
+            
             hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_with_mlapo(
                 hidden_states=hidden_states,
                 kv_cache=kv_cache,
@@ -1083,7 +1087,17 @@ class AscendSFAImpl(MLAAttentionImpl):
                 slot_mapping=slot_mapping,
                 num_input_tokens=num_input_tokens,
             )
+            
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                check_nan(hidden_states, "hidden_states after mlapo", layer_name)
+                check_nan(ql_nope, "ql_nope after mlapo", layer_name)
+                check_nan(q_pe, "q_pe after mlapo", layer_name)
+            
             k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
+            
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                check_nan(k_li, "k_li after indexer_select_pre_process", layer_name)
+            
             wait_for_kv_layer_from_connector(layer_name)
         # native
         else:
@@ -1228,12 +1242,23 @@ class AscendSFAImpl(MLAAttentionImpl):
             actual_seq_lengths_query=actual_seq_lengths_query,
             actual_seq_lengths_key=actual_seq_lengths_key,
         )
+        
+        from vllm_ascend.utils_debug import check_nan
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            check_nan(ql_nope, "ql_nope before qsfa", layer_name)
+            check_nan(q_pe, "q_pe before qsfa", layer_name)
 
         attn_output = self._execute_sparse_flash_attention_process(
             ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
         )
+        
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            check_nan(attn_output, "attn_output after qsfa", layer_name)
 
         attn_output = self._v_up_proj(attn_output)
+        
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            check_nan(attn_output, "attn_output after v_up_proj", layer_name)
         weight_prefetch_method = get_weight_prefetch_method()
         weight_prefetch_method.maybe_prefetch_mla_or_sla_weight_in_current_stream(
             inputs=self.o_proj.weight,

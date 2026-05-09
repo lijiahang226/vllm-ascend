@@ -884,11 +884,20 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
     ) -> torch.Tensor:
+        from vllm_ascend.utils_debug import check_nan
+        from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType
+        
         block_table = attn_metadata.block_table
         kv = kv_cache[0]
         key_rope = kv_cache[1]
 
         query = torch.cat([ql_nope, q_pe], dim=-1)
+        
+        # Debug: Check inputs before qsfa
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            check_nan(query, "qsfa query input", "")
+            check_nan(kv, "qsfa kv input", "")
+            check_nan(topk_indices, "qsfa topk_indices input", "")
 
         # Debug: Save inputs for qsfa operator
         try:
@@ -912,6 +921,11 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 value_quant_mode=2,
                 rope_head_dim=64
             )
+            
+            # Debug: Check output after qsfa
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                check_nan(attn_output, "qsfa attn_output output", "")
+                
         except Exception as e:
             import torch.distributed as dist
             rank = dist.get_rank() if dist.is_initialized() else 0
@@ -947,6 +961,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             
             torch.save(debug_data, filename)
             print(f"[Rank {rank}] Saved qsfa inputs to {filename}")
+            raise e
 
         return attn_output
 

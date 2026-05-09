@@ -434,6 +434,9 @@ class AscendFusedMoE(FusedMoE):
     def forward_impl(  # type: ignore[override]
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor, return_with_event: bool = False
     ) -> torch.Tensor | FusedMoEResult:
+        from vllm_ascend.utils_debug import check_nan
+        from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType
+        
         assert self.quant_method is not None
 
         forward_context = get_forward_context()
@@ -449,6 +452,12 @@ class AscendFusedMoE(FusedMoE):
         enable_force_load_balance = _EXTRA_CTX.in_profile_run
 
         forward_context = get_forward_context()
+        
+        # Debug: Check input
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            check_nan(hidden_states, "MoE input hidden_states", "")
+            check_nan(router_logits, "MoE input router_logits", "")
+        
         if self.multistream_overlap_gate:
             assert AscendFusedMoE.gate_stream is not None
             fc3_context = get_flash_common3_context()
@@ -505,6 +514,10 @@ class AscendFusedMoE(FusedMoE):
         if self.multistream_overlap_gate:
             torch.npu.current_stream().wait_stream(AscendFusedMoE.gate_stream)
 
+        # Debug: Check before quant_method.apply
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            check_nan(hidden_states, "MoE hidden_states before quant_method.apply", "")
+
         # Matrix multiply.
         fused_experts_results: FusedExpertsResult = self.quant_method.apply(
             layer=self,
@@ -529,6 +542,10 @@ class AscendFusedMoE(FusedMoE):
             global_redundant_expert_num=self.global_redundant_expert_num,
             mc2_mask=mc2_mask,
         )
+        
+        # Debug: Check after quant_method.apply
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            check_nan(fused_experts_results.routed_out, "MoE routed_out after quant_method.apply", "")
 
         if self.dynamic_eplb:
             expert_tokens = fused_experts_results.expert_tokens
