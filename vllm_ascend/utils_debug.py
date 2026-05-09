@@ -58,63 +58,35 @@ def check_nan(tensor: torch.Tensor, name: str, layer_name: str = "", extra_info:
         layer_name: Name of the layer (e.g., "model.layers.0")
         extra_info: Additional information to print
     """
+    # Skip check for very large tensors to avoid OOM
+    MAX_TENSOR_SIZE = 100 * 1024 * 1024  # 100M elements
+    if tensor.numel() > MAX_TENSOR_SIZE:
+        return False
+    
     # Store original dtype
     original_dtype = tensor.dtype
-    total = tensor.numel()
     
-    # For float8 types, check in chunks to avoid OOM
+    # Convert float8 types to bfloat16 for checking
     if tensor.dtype in [torch.float8_e4m3fn, torch.float8_e5m2, torch.float8_e4m3fnuz, torch.float8_e5m2fnuz, torch.float8_e8m0fnu]:
-        # Check in chunks to avoid OOM
-        chunk_size = 1024 * 1024  # 1M elements per chunk
-        nan_count = 0
-        
-        # Flatten tensor for chunked processing
-        flat_tensor = tensor.view(-1)
-        
-        for i in range(0, total, chunk_size):
-            chunk = flat_tensor[i:min(i+chunk_size, total)]
-            chunk_bf16 = chunk.to(torch.bfloat16)
-            nan_count += torch.isnan(chunk_bf16).sum().item()
-            
-            # Early exit if nan found
-            if nan_count > 0:
-                # Continue counting to get total nan count (optional, can break here for speed)
-                # For now, we break early to save memory
-                break
-        
-        has_nan = nan_count > 0
-    else:
-        # For other types, check directly
-        has_nan = torch.isnan(tensor).any()
-        if has_nan:
-            nan_count = torch.isnan(tensor).sum().item()
+        tensor = tensor.to(torch.bfloat16)
     
-    if has_nan:
+    if torch.isnan(tensor).any():
+        nan_count = torch.isnan(tensor).sum().item()
+        total = tensor.numel()
         print(f"\n{'='*80}")
         print(f"[NaN Detected] {name} in {layer_name}")
         print(f"  Shape: {tensor.shape}")
         print(f"  Original dtype: {original_dtype}")
-        print(f"  Total elements: {total}")
-        if 'nan_count' in locals():
-            print(f"  NaN count: {nan_count}/{total} ({100*nan_count/total:.2f}%)")
+        print(f"  NaN count: {nan_count}/{total} ({100*nan_count/total:.2f}%)")
         
-        # Sample statistics to avoid OOM
-        if nan_count < total if 'nan_count' in locals() else True:
-            # Sample first 1000 elements for statistics
-            sample_size = min(1000, total)
-            if tensor.dtype in [torch.float8_e4m3fn, torch.float8_e5m2, torch.float8_e4m3fnuz, torch.float8_e5m2fnuz, torch.float8_e8m0fnu]:
-                sample = tensor.view(-1)[:sample_size].to(torch.bfloat16)
-            else:
-                sample = tensor.view(-1)[:sample_size]
-            
-            valid_sample = sample[~torch.isnan(sample)]
-            if len(valid_sample) > 0:
-                print(f"  Sample statistics (first {sample_size} elements):")
-                print(f"    Min: {valid_sample.min().item():.6e}")
-                print(f"    Max: {valid_sample.max().item():.6e}")
-                print(f"    Mean: {valid_sample.mean().item():.6e}")
+        if nan_count < total:
+            valid_tensor = tensor[~torch.isnan(tensor)]
+            print(f"  Min: {valid_tensor.min().item():.6e}")
+            print(f"  Max: {valid_tensor.max().item():.6e}")
+            print(f"  Mean: {valid_tensor.mean().item():.6e}")
+            print(f"  Std: {valid_tensor.std().item():.6e}")
         else:
-            print(f"  All values are NaN!")
+            print(f"  Min/Max/Mean/Std: All values are NaN!")
         
         if extra_info:
             print(f"  Extra info: {extra_info}")
