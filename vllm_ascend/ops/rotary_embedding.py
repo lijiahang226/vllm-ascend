@@ -96,6 +96,9 @@ def get_cos_and_sin_mla(positions, use_cache=False):
     global _cos_mla
     global _sin_mla
     num_tokens = positions.size(0)
+    if _cos_mla is None or _cos_mla.shape[0] < num_tokens or _cos_mla.shape[-1] != cos.shape[-1]:
+        _cos_mla = torch.empty(num_tokens, 1, 1, cos.shape[-1], dtype=cos.dtype, device=cos.device)
+        _sin_mla = torch.empty(num_tokens, 1, 1, sin.shape[-1], dtype=sin.dtype, device=sin.device)
     _cos_mla[:num_tokens, ...] = cos
     _sin_mla[:num_tokens, ...] = sin
     return _cos_mla[:num_tokens, ...], _sin_mla[:num_tokens, ...]
@@ -111,6 +114,8 @@ def _record_cos_sin_cache(cos_sin_cache):
 def _record_cos_and_sin_cache(cos_cache, sin_cache):
     global _cos_cache
     global _sin_cache
+    if _cos_cache is not None or _sin_cache is not None:
+        return
     _cos_cache = cos_cache
     _sin_cache = sin_cache
 
