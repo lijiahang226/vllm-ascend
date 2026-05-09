@@ -818,6 +818,8 @@ class NPUModelRunner(GPUModelRunner):
         self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
         self.query_start_loc.copy_to_gpu()
 
+        self.actual_seq_lengths_q = cu_num_tokens.tolist()
+
         # Now, query_start_loc is padded.
         # But gdn needs an unpadded one.
         # gdn_query_start_loc is an unpadded version of query_start_loc.
@@ -2839,6 +2841,7 @@ class NPUModelRunner(GPUModelRunner):
             num_scheduled_tokens, self.query_pos.np)
             self.query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
             self.query_start_loc.copy_to_gpu()
+            self.actual_seq_lengths_q = cum_num_tokens.tolist()
             if self._has_gdn:
                 self.gdn_query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
                 self.gdn_query_start_loc.copy_to_gpu()
