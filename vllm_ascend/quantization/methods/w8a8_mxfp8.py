@@ -270,7 +270,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
 
         assert router_logits.shape[1] == num_experts, "Number of global experts mismatch (excluding redundancy)"
         if get_ascend_device_type() == AscendDeviceType.A5:
-            check_nan(x, "W8A8_MXFP8 MoE input x", layer.prefix)
+            check_nan(x, "W8A8_MXFP8 MoE input x", getattr(layer, "prefix", getattr(layer, "layer_name", "")))
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
