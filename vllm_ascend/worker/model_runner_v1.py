@@ -3436,13 +3436,10 @@ class NPUModelRunner(GPUModelRunner):
                         k_cache_dtype = self.c8_k_cache_dtype
                     
                     k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape)
-                    if not (self.use_sparse and current_sparse_c8 and get_ascend_device_type() == AscendDeviceType.A5):
-                        if v_cache is not None:
-                            v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape)
-                        else:
-                            v_cache = None
-                    else:
+                    if self.use_sparse and current_sparse_c8 and get_ascend_device_type() == AscendDeviceType.A5:
                         v_cache = None
+                    else:
+                        v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape)
 
                     if self.use_sparse:
                         dsa_k_cache_shape = (
