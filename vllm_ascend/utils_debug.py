@@ -62,7 +62,7 @@ def check_nan(tensor: torch.Tensor, name: str, layer_name: str = "", extra_info:
     original_dtype = tensor.dtype
     
     # Convert float8 types to bfloat16 for checking
-    if tensor.dtype in [torch.float8_e4m3fn, torch.float8_e5m2, torch.float8_e4m3fnuz, torch.float8_e5m2fnuz]:
+    if tensor.dtype in [torch.float8_e4m3fn, torch.float8_e5m2, torch.float8_e4m3fnuz, torch.float8_e5m2fnuz, torch.float8_e8m0fnu]:
         tensor = tensor.to(torch.bfloat16)
     
     if torch.isnan(tensor).any():
