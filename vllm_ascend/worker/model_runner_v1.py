@@ -292,7 +292,7 @@ class NPUModelRunner(GPUModelRunner):
             vllm_config.model_config.hf_text_config, "index_topk"
         )
         if self.use_sparse:
-            if get_ascend_device_type() == AscendDeviceType.A5:
+            if get_ascend_device_type() == AscendDeviceType.A5 and self.ascend_config.enable_sparse_c8:
                 self.sparse_head_dim = (
                     656,
                     0,
