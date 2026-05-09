@@ -405,11 +405,31 @@ class AscendFusedMoE(FusedMoE):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType
+        
+        # Debug: Check for NaN in input hidden_states
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            if torch.isnan(hidden_states).any():
+                print(f"[MoE Forward] NaN detected in input hidden_states! shape={hidden_states.shape}")
+                print(f"  NaN count: {torch.isnan(hidden_states).sum().item()}, Total: {hidden_states.numel()}")
+        
         self.ensure_moe_quant_config_init()
-        return self.runner.forward(
+        result = self.runner.forward(
             hidden_states,
             router_logits,
         )
+        
+        # Debug: Check for NaN in output
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            if isinstance(result, tuple):
+                output = result[0]
+            else:
+                output = result
+            if torch.isnan(output).any():
+                print(f"[MoE Forward] NaN detected in output! shape={output.shape}")
+                print(f"  NaN count: {torch.isnan(output).sum().item()}, Total: {output.numel()}")
+        
+        return result
 
     def forward_impl(  # type: ignore[override]
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor, return_with_event: bool = False

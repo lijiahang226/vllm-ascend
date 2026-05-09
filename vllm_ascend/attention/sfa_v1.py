@@ -1032,6 +1032,13 @@ class AscendSFAImpl(MLAAttentionImpl):
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
+        
+        # Debug: Check for NaN in input hidden_states
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            if torch.isnan(hidden_states).any():
+                print(f"[SFA Forward] NaN detected in input hidden_states! shape={hidden_states.shape}, layer={layer_name}")
+                print(f"  NaN count: {torch.isnan(hidden_states).sum().item()}, Total: {hidden_states.numel()}")
+        
         if attn_metadata is None:
             # Profiling run.
             if self.enable_dsa_cp_with_layer_shard and not _EXTRA_CTX.in_profile_run:
@@ -1252,5 +1259,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         output[...] = self.o_proj(attn_output)[0]
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+        
+        # Debug: Check for NaN in output
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            if torch.isnan(output).any():
+                print(f"[SFA Forward] NaN detected in output! shape={output.shape}, layer={layer_name}")
+                print(f"  NaN count: {torch.isnan(output).sum().item()}, Total: {output.numel()}")
 
         return output_padded
