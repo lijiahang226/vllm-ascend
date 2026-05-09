@@ -58,12 +58,20 @@ def check_nan(tensor: torch.Tensor, name: str, layer_name: str = "", extra_info:
         layer_name: Name of the layer (e.g., "model.layers.0")
         extra_info: Additional information to print
     """
+    # Store original dtype
+    original_dtype = tensor.dtype
+    
+    # Convert float8 types to bfloat16 for checking
+    if tensor.dtype in [torch.float8_e4m3fn, torch.float8_e5m2, torch.float8_e4m3fnuz, torch.float8_e5m2fnuz]:
+        tensor = tensor.to(torch.bfloat16)
+    
     if torch.isnan(tensor).any():
         nan_count = torch.isnan(tensor).sum().item()
         total = tensor.numel()
         print(f"\n{'='*80}")
         print(f"[NaN Detected] {name} in {layer_name}")
         print(f"  Shape: {tensor.shape}")
+        print(f"  Original dtype: {original_dtype}")
         print(f"  NaN count: {nan_count}/{total} ({100*nan_count/total:.2f}%)")
         
         if nan_count < total:
