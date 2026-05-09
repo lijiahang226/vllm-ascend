@@ -778,9 +778,24 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         slot_mapping: torch.Tensor,
         num_input_tokens: int,
     ) -> tuple:
+        from vllm_ascend.utils_debug import check_nan
+        from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType
+        
         bsz = num_input_tokens
         hidden_states_temp = hidden_states[:bsz].unsqueeze(1)
+        
+        # Debug: Check mlapo inputs
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            check_nan(hidden_states_temp, "mlapo hidden_states_temp input before quant", "")
+            check_nan(cos, "mlapo cos input", "")
+            check_nan(sin, "mlapo sin input", "")
+        
         hidden_states_temp, dynamic_scale = torch_npu.npu_dynamic_mx_quant(hidden_states_temp, dst_type=torch.float8_e4m3fn)
+        
+        # Debug: Check after quantization
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            check_nan(hidden_states_temp, "mlapo hidden_states_temp after quant", "")
+            check_nan(dynamic_scale, "mlapo dynamic_scale", "")
 
         dynamic_scale = dynamic_scale.reshape(hidden_states_temp.shape[0] * hidden_states_temp.shape[1], -1)
         cos_shape = cos.shape
@@ -789,6 +804,10 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
         decode_k_nope = kv_cache[0]
         kr_cache = torch.zeros((0, 0, decode_k_nope.shape[2], cos_shape[-1]), dtype=torch.bfloat16, device=decode_k_nope.device)
+        
+        # Debug: Check kv_cache
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            check_nan(decode_k_nope, "mlapo decode_k_nope (kv_cache)", "")
 
         decode_q_nope, q_pe, _, q_c, q_c_scale = torch_npu.npu_mla_prolog_v3(
             token_x=hidden_states_temp,
@@ -815,6 +834,14 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             quant_scale_repo_mode=1,
             query_norm_flag=True
         )
+        
+        # Debug: Check mlapo outputs
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            check_nan(decode_q_nope, "mlapo decode_q_nope output", "")
+            check_nan(q_pe, "mlapo q_pe output", "")
+            check_nan(q_c, "mlapo q_c output", "")
+            if q_c_scale is not None:
+                check_nan(q_c_scale, "mlapo q_c_scale output", "")
 
         decode_q_nope = decode_q_nope.view(bsz, sfa_impl.num_heads, sfa_impl.kv_lora_rank)
         q_pe = q_pe.view(bsz, sfa_impl.num_heads, 64)
