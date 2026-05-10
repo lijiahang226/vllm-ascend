@@ -789,7 +789,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         sin = sin.view(cos_shape[0], 1, cos_shape[-1])
 
         decode_k_nope = kv_cache[0]
-        kr_cache = kv_cache[1]
+        kr_cache = kv_cache[1] if use_per_tile_kv_cache else kv_cache[0],
 
         if is_quantized:
             hidden_states_temp, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
