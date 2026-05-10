@@ -849,7 +849,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         decode_q_nope = decode_q_nope.view(bsz, sfa_impl.num_heads, sfa_impl.kv_lora_rank)
         q_pe = q_pe.view(bsz, sfa_impl.num_heads, 64)
 
-        return hidden_states, decode_q_nope, q_pe, (q_c, q_c_scale)
+        return hidden_states, decode_q_nope, q_pe, (q_c, q_c_scale) if q_c_scale is not None else q_c
 
     @staticmethod
     def indexer_select_post_process(
