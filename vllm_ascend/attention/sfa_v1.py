@@ -462,7 +462,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.use_torch_npu_lightning_indexer = True
 
         # dsa c8
-        self.use_sparse_c8_indexer = ascend_config.is_sparse_c8_layer(self.layer_name)
+        self.use_sparse_c8_indexer = (
+            ascend_config.is_sparse_c8_layer(self.layer_name)
+            and getattr(getattr(self, 'fused_qkv_a_proj', None), 'quant_method', None) is not None
+        )
         if self.use_sparse_c8_indexer:
             if get_ascend_device_type() == AscendDeviceType.A5:
                 self.c8_k_cache_dtype = torch.float8_e4m3fn

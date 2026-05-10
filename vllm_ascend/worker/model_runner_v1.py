@@ -3751,6 +3751,12 @@ class NPUModelRunner(GPUModelRunner):
                     from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
                     # TODO(rjg-lyh): when kv_cache_spec's refactor is ready,
                     # implement it by creating a new kv_cache_spec class
+                    is_draft_float = (
+                        self.drafter is not None
+                        and self.drafter.attn_layer_names
+                        and layer_name in self.drafter.attn_layer_names
+                        and getattr(getattr(attn_module, 'fused_qkv_a_proj', None), 'quant_method', None) is None
+                    )
                     kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
                         block_size=self.block_size,
                         num_kv_heads=1,
@@ -3758,7 +3764,7 @@ class NPUModelRunner(GPUModelRunner):
                         sparse_head_dim=self.sparse_head_dim,
                         dtype=self.kv_cache_dtype,
                         cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
-                        cache_sparse_c8=self.ascend_config.is_sparse_c8_layer(layer_name),
+                        cache_sparse_c8=self.ascend_config.is_sparse_c8_layer(layer_name) and not is_draft_float,
                     )
                 elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
