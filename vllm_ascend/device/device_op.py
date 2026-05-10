@@ -958,6 +958,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 layout_query="TND",
                 layout_kv="PA_BSND",
                 sparse_mode=3,
+                attention_mode=2
             )
         return attn_output
 
