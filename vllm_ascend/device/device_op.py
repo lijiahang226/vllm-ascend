@@ -777,6 +777,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         sin = sin.view(cos_shape[0], 1, cos_shape[-1])
 
         decode_k_nope = kv_cache[0]
+        use_per_tile_kv_cache = getattr(sfa_impl, 'use_sparse_c8_indexer', False)
         kr_cache = kv_cache[1] if use_per_tile_kv_cache else kv_cache[0],
 
         if is_quantized:
@@ -784,8 +785,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 hidden_states_temp, dst_type=torch.float8_e4m3fn
             )
             dynamic_scale = dynamic_scale.reshape(hidden_states_temp.shape[0] * hidden_states_temp.shape[1], -1)
-
-            use_per_tile_kv_cache = getattr(sfa_impl, 'use_sparse_c8_indexer', False)
 
             decode_q_nope, q_pe, _, q_c, q_c_scale = torch_npu.npu_mla_prolog_v3(
                 token_x=hidden_states_temp,
