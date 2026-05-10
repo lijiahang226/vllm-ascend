@@ -942,7 +942,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 rope_head_dim=64
             )
         else:
-            attn_output = torch_npu.npu_sparse_flash_attention(
+            attn_output, _, _ = torch_npu.npu_sparse_flash_attention(
                 query=ql_nope,
                 key=kv,
                 value=kv,
