@@ -790,7 +790,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
         decode_k_nope = kv_cache[0]
         use_c8 = getattr(sfa_impl, 'use_sparse_c8_indexer', False)
-        kr_cache = torch.zeros(0, 0, decode_k_nope.shape[-2], cos_shape[-1], dtype=torch.bfloat16) if use_c8 else kv_cache[1]
+        kr_cache = torch.zeros(0, 0, decode_k_nope.shape[-2], cos_shape[-1], dtype=torch.bfloat16, device=decode_k_nope.device) if use_c8 else kv_cache[1]
 
         if is_quantized:
             hidden_states_temp, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
