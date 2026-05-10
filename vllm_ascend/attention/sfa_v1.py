@@ -562,7 +562,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             is_quantized = isinstance(quant_method, AscendW8A8LinearMethod) or isinstance(
                 quant_method, AscendW8A8MXFP8DynamicLinearMethod
             )
-            if self.fused_qkv_a_proj is None or not is_quantized:
+            if self.fused_qkv_a_proj is None or (
+                not is_quantized and get_ascend_device_type() != AscendDeviceType.A5
+            ):
                 reasons.append(
                     "Currently mlapo only supports W8A8 quantization in SFA scenario."
                     "Some layers in your model are not quantized with W8A8,"
