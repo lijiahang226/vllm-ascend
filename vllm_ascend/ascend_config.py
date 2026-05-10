@@ -273,12 +273,8 @@ class AscendConfig:
         return layer_ids, layer_names
 
     def is_sparse_c8_layer(self, layer_name: str | None) -> bool:
-        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
-        
         if not self.enable_sparse_c8:
             return False
-        if get_ascend_device_type() == AscendDeviceType.A5:
-            return True
         if not self._sparse_c8_layer_filter_enabled:
             return True
         if layer_name is None:
