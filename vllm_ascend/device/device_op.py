@@ -836,10 +836,12 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             decode_q_nope = torch.nn.functional.pad(decode_q_nope, (0, 0, 0, 0, 0, pad_size))
             q_pe = torch.nn.functional.pad(q_pe, (0, 0, 0, 0, 0, pad_size))
             q_c = torch.nn.functional.pad(q_c, (0, 0, 0, pad_size))
-            if q_c_scale is not None:
-                q_c_scale = torch.nn.functional.pad(q_c_scale, (0, 0, 0, pad_size))
+            q_c_scale = torch.nn.functional.pad(
+                q_c_scale,
+                (0, 0) * (q_c_scale.ndim - 1) + (0, pad_size),
+            )
 
-        return hidden_states, decode_q_nope, q_pe, (q_c, q_c_scale) if q_c_scale is not None else q_c
+        return hidden_states, decode_q_nope, q_pe, (q_c, q_c_scale)
 
     @staticmethod
     def indexer_select_post_process(
