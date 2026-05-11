@@ -679,7 +679,6 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def _process_weights_for_fused_mlapo_a5(self, act_dtype: torch.dtype):
         weight_dq = self.fused_qkv_a_proj.weight.data[..., : self.q_lora_rank].contiguous()
-        self.weight_dq_cpu = weight_dq.cpu()
         self.weight_dq = torch_npu.npu_format_cast(weight_dq, 29)
 
         weight_uq_qr = self.q_proj.weight.data.contiguous()
@@ -687,11 +686,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.weight_uq_qr_scale = self.weight_uq_qr_scale.reshape(
             -1, self.weight_uq_qr_scale.shape[1] * self.weight_uq_qr_scale.shape[2]
         )
-        self.weight_uq_qr_cpu = weight_uq_qr.cpu()
         self.weight_uq_qr = torch_npu.npu_format_cast(weight_uq_qr, 29)
 
         weight_dkv_kr = self.fused_qkv_a_proj.weight.data[..., self.q_lora_rank :].contiguous()
-        self.weight_dkv_kr_cpu = weight_dkv_kr.cpu()
         self.weight_dkv_kr = torch_npu.npu_format_cast(weight_dkv_kr, 29)
 
         weight_scale = self.fused_qkv_a_proj.weight_scale
@@ -919,6 +916,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         sin: torch.Tensor,
         slot_mapping: torch.Tensor,
         num_input_tokens: int,
+        num_actual_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         return DeviceOperator.sfa_preprocess_with_mlapo(
             self,
@@ -928,6 +926,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             sin,
             slot_mapping,
             num_input_tokens,
+            num_actual_tokens
         )
 
     def indexer_select_pre_process(
@@ -1112,15 +1111,24 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         # run mlapo ops when dsa-cp is disabled, and ensure that num_tokens satisfies the count limitation
         if self.enable_mlapo:
+            num_actual = attn_metadata.num_actual_tokens
+
             hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_with_mlapo(
                 hidden_states=hidden_states,
                 kv_cache=kv_cache,
                 cos=cos,
                 sin=sin,
-                slot_mapping=slot_mapping,
-                num_input_tokens=num_input_tokens,
+                slot_mapping=slot_mapping[:attn_metadata.num_actual_tokens],
+                num_input_tokens=attn_metadata.num_actual_tokens,
             )
-            k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
+            k_li, k_li_scale = self.indexer_select_pre_process(
+                x=hidden_states[:attn_metadata.num_actual_tokens],
+                cos=cos[:attn_metadata.num_actual_tokens],
+                sin=sin[:attn_metadata.num_actual_tokens],
+            )
+            cos = cos[:attn_metadata.num_actual_tokens]
+            sin = sin[:attn_metadata.num_actual_tokens]
+            hidden_states = hidden_states[:attn_metadata.num_actual_tokens]
             wait_for_kv_layer_from_connector(layer_name)
         # native
         else:

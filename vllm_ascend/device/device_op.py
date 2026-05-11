@@ -300,6 +300,7 @@ class BaseDeviceAdaptor:
         sin: torch.Tensor,
         slot_mapping: torch.Tensor,
         num_input_tokens: int,
+        num_actual_tokens: int,
     ) -> tuple:
         k_nope, k_pe = kv_cache[0], kv_cache[1]
         ql_nope = torch.empty(
@@ -780,8 +781,13 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         num_input_tokens: int,
         num_actual_tokens: int,
     ) -> tuple:
-        bsz = num_input_tokens
+        total = hidden_states.shape[0]
+        del num_input_tokens
+        bsz = num_actual_tokens
+        slot_mapping = slot_mapping[:bsz]
         hidden_states_temp = hidden_states[:bsz].unsqueeze(1)
+        cos = cos[:bsz, ...]
+        sin = sin[:bsz, ...]
         
         is_quantized = getattr(sfa_impl, 'mlapo_is_quantized', True)
         cos = cos[:bsz, ...]
