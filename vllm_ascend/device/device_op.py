@@ -776,8 +776,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         hidden_states_temp = hidden_states[:bsz].unsqueeze(1)
         cos = cos[:bsz, ...]
         sin = sin[:bsz, ...]
-        
-        is_quantized = getattr(sfa_impl, 'mlapo_is_quantized', True)
 
         cos_shape = cos.shape
         cos = cos.view(cos_shape[0], 1, cos_shape[-1])
@@ -787,62 +785,47 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         use_c8 = getattr(sfa_impl, 'use_sparse_c8_indexer', False)
         kr_cache = torch.zeros(0, 0, decode_k_nope.shape[-2], cos_shape[-1], dtype=torch.bfloat16, device=decode_k_nope.device) if use_c8 else kv_cache[1]
 
-        if is_quantized:
-            hidden_states_temp, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
-                hidden_states_temp, dst_type=torch.float8_e4m3fn
-            )
-            dynamic_scale = dynamic_scale.reshape(hidden_states_temp.shape[0] * hidden_states_temp.shape[1], -1)
+        hidden_states_temp, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
+            hidden_states_temp, dst_type=torch.float8_e4m3fn
+        )
+        dynamic_scale = dynamic_scale.reshape(hidden_states_temp.shape[0] * hidden_states_temp.shape[1], -1)
 
-            decode_q_nope, q_pe, _, q_c, q_c_scale = torch_npu.npu_mla_prolog_v3(
-                token_x=hidden_states_temp,
-                weight_dq=sfa_impl.weight_dq,
-                weight_uq_qr=sfa_impl.weight_uq_qr,
-                weight_uk=sfa_impl.W_UK_T,
-                weight_dkv_kr=sfa_impl.weight_dkv_kr,
-                rmsnorm_gamma_cq=sfa_impl.q_a_layernorm.weight.data,
-                rmsnorm_gamma_ckv=sfa_impl.kv_a_layernorm.weight.data,
-                rope_sin=sin,
-                rope_cos=cos,
-                kv_cache=decode_k_nope,
-                kr_cache=kr_cache,
-                cache_index=slot_mapping[:bsz].view(bsz, -1).to(torch.int64),
-                dequant_scale_x=dynamic_scale.view(torch.float8_e8m0fnu),
-                dequant_scale_w_dq=sfa_impl.weight_dq_scale.view(torch.float8_e8m0fnu),
-                dequant_scale_w_uq_qr=sfa_impl.weight_uq_qr_scale.view(torch.float8_e8m0fnu),
-                dequant_scale_w_dkv_kr=sfa_impl.weight_dkv_kr_scale.view(torch.float8_e8m0fnu),
-                cache_mode="PA_BSND",
-                weight_quant_mode=3,
-                kv_cache_quant_mode=3 if use_c8 else 0,
-                query_quant_mode=0,
-                ckvkr_repo_mode=1 if use_c8 else 0,
-                quant_scale_repo_mode=1 if use_c8 else 0,
-                query_norm_flag=True
-            )
-        else:
-            decode_q_nope, q_pe, _, q_c, q_c_scale = torch_npu.npu_mla_prolog_v3(
-                token_x=hidden_states_temp,
-                weight_dq=sfa_impl.weight_dq,
-                weight_uq_qr=sfa_impl.weight_uq_qr,
-                weight_uk=sfa_impl.W_UK_T,
-                weight_dkv_kr=sfa_impl.weight_dkv_kr,
-                rmsnorm_gamma_cq=sfa_impl.q_a_layernorm.weight.data,
-                rmsnorm_gamma_ckv=sfa_impl.kv_a_layernorm.weight.data,
-                rope_sin=sin,
-                rope_cos=cos,
-                kv_cache=decode_k_nope,
-                kr_cache=kr_cache,
-                cache_index=slot_mapping[:bsz].view(bsz, -1).to(torch.int64),
-                cache_mode="PA_BSND",
-                weight_quant_mode=0,
-                kv_cache_quant_mode=0,
-                query_quant_mode=0,
-                ckvkr_repo_mode=0,
-                quant_scale_repo_mode=0,
-                query_norm_flag=True
-            )
+        decode_q_nope, q_pe, _, q_c, q_c_scale = torch_npu.npu_mla_prolog_v3(
+            token_x=hidden_states_temp,
+            weight_dq=sfa_impl.weight_dq,
+            weight_uq_qr=sfa_impl.weight_uq_qr,
+            weight_uk=sfa_impl.W_UK_T,
+            weight_dkv_kr=sfa_impl.weight_dkv_kr,
+            rmsnorm_gamma_cq=sfa_impl.q_a_layernorm.weight.data,
+            rmsnorm_gamma_ckv=sfa_impl.kv_a_layernorm.weight.data,
+            rope_sin=sin,
+            rope_cos=cos,
+            kv_cache=decode_k_nope,
+            kr_cache=kr_cache,
+            cache_index=slot_mapping[:bsz].view(bsz, -1).to(torch.int64),
+            dequant_scale_x=dynamic_scale.view(torch.float8_e8m0fnu),
+            dequant_scale_w_dq=sfa_impl.weight_dq_scale.view(torch.float8_e8m0fnu),
+            dequant_scale_w_uq_qr=sfa_impl.weight_uq_qr_scale.view(torch.float8_e8m0fnu),
+            dequant_scale_w_dkv_kr=sfa_impl.weight_dkv_kr_scale.view(torch.float8_e8m0fnu),
+            cache_mode="PA_BSND",
+            weight_quant_mode=3,
+            kv_cache_quant_mode=3 if use_c8 else 0,
+            query_quant_mode=0,
+            ckvkr_repo_mode=1 if use_c8 else 0,
+            quant_scale_repo_mode=1 if use_c8 else 0,
+            query_norm_flag=True
+        )
 
         decode_q_nope = decode_q_nope.view(bsz, sfa_impl.num_heads, sfa_impl.kv_lora_rank)
         q_pe = q_pe.view(bsz, sfa_impl.num_heads, 64)
+
+        if bsz < total:
+            pad_size = total - bsz
+            decode_q_nope = torch.nn.functional.pad(decode_q_nope, (0, 0, 0, 0, 0, pad_size))
+            q_pe = torch.nn.functional.pad(q_pe, (0, 0, 0, 0, 0, pad_size))
+            q_c = torch.nn.functional.pad(q_c, (0, 0, 0, pad_size))
+            if q_c_scale is not None:
+                q_c_scale = torch.nn.functional.pad(q_c_scale, (0, 0, 0, pad_size))
 
         return hidden_states, decode_q_nope, q_pe, (q_c, q_c_scale) if q_c_scale is not None else q_c
 
