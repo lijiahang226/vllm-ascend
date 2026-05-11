@@ -777,7 +777,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         cos: torch.Tensor,
         sin: torch.Tensor,
         slot_mapping: torch.Tensor,
-        num_input_tokens: int
+        num_input_tokens: int,
         num_actual_tokens: int,
     ) -> tuple:
         total = hidden_states.shape[0]
