@@ -1092,10 +1092,17 @@ class AscendSFAImpl(MLAAttentionImpl):
                 kv_cache=kv_cache,
                 cos=cos,
                 sin=sin,
-                slot_mapping=slot_mapping,
-                num_input_tokens=num_input_tokens,
+                slot_mapping=slot_mapping[:attn_metadata.num_actual_tokens],
+                num_input_tokens=attn_metadata.num_actual_tokens,
             )
-            k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
+            k_li, k_li_scale = self.indexer_select_pre_process(
+                x=hidden_states[:attn_metadata.num_actual_tokens],
+                cos=cos[:attn_metadata.num_actual_tokens],
+                sin=sin[:attn_metadata.num_actual_tokens],
+            )
+            cos = cos[:attn_metadata.num_actual_tokens]
+            sin = sin[:attn_metadata.num_actual_tokens]
+            hidden_states = hidden_states[:attn_metadata.num_actual_tokens]
             wait_for_kv_layer_from_connector(layer_name)
         # native
         else:
