@@ -334,6 +334,12 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
                 actual_seq_lengths_key=actual_seq_lengths_key,
             )
 
+        if not self.enable_dsa_cp and get_ascend_device_type() == AscendDeviceType.A5:
+            num_real_reqs = int((cum_query_lens <= num_actual_tokens).sum().item())
+            cum_query_lens = cum_query_lens[:num_real_reqs]
+            seq_lens = seq_lens[:num_real_reqs]
+            seq_lens_cpu = seq_lens_cpu[:num_real_reqs]
+
         return self.metadata_cls(  # type: ignore
             num_input_tokens=common_attn_metadata.num_input_tokens,
             num_actual_tokens=num_actual_tokens,
@@ -920,6 +926,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         sin: torch.Tensor,
         slot_mapping: torch.Tensor,
         num_input_tokens: int,
+        num_actual_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         return DeviceOperator.sfa_preprocess_with_mlapo(
             self,
@@ -929,6 +936,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             sin,
             slot_mapping,
             num_input_tokens,
+            num_actual_tokens
         )
 
     def indexer_select_pre_process(
@@ -1102,22 +1110,22 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         # run mlapo ops when dsa-cp is disabled, and ensure that num_tokens satisfies the count limitation
         if self.enable_mlapo:
+            num_actual = attn_metadata.num_actual_tokens
+
             hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_with_mlapo(
                 hidden_states=hidden_states,
                 kv_cache=kv_cache,
                 cos=cos,
                 sin=sin,
-                slot_mapping=slot_mapping[:attn_metadata.num_actual_tokens],
-                num_input_tokens=attn_metadata.num_actual_tokens,
+                slot_mapping=slot_mapping,
+                num_input_tokens=num_input_tokens,
+                num_actual_tokens=num_actual,
             )
             k_li, k_li_scale = self.indexer_select_pre_process(
-                x=hidden_states[:attn_metadata.num_actual_tokens],
-                cos=cos[:attn_metadata.num_actual_tokens],
-                sin=sin[:attn_metadata.num_actual_tokens],
+                x=hidden_states[:num_actual],
+                cos=cos[:num_actual],
+                sin=sin[:num_actual],
             )
-            cos = cos[:attn_metadata.num_actual_tokens]
-            sin = sin[:attn_metadata.num_actual_tokens]
-            hidden_states = hidden_states[:attn_metadata.num_actual_tokens]
             wait_for_kv_layer_from_connector(layer_name)
         # native
         else:
