@@ -777,10 +777,13 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         cos: torch.Tensor,
         sin: torch.Tensor,
         slot_mapping: torch.Tensor,
-        num_input_tokens: int,
+        num_tokens: int,
     ) -> tuple:
-        bsz = num_input_tokens
+        bsz = num_tokens
+        slot_mapping = slot_mapping[:bsz]
         hidden_states_temp = hidden_states[:bsz].unsqueeze(1)
+        cos = cos[:bsz, ...]
+        sin = sin[:bsz, ...]
         
         is_quantized = getattr(sfa_impl, 'mlapo_is_quantized', True)
 
