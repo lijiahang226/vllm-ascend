@@ -829,16 +829,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
         decode_q_nope = decode_q_nope.view(bsz, sfa_impl.num_heads, sfa_impl.kv_lora_rank)
         q_pe = q_pe.view(bsz, sfa_impl.num_heads, 64)
-
-        if bsz < total:
-            pad_size = total - bsz
-            decode_q_nope = torch.nn.functional.pad(decode_q_nope, (0, 0, 0, 0, 0, pad_size))
-            q_pe = torch.nn.functional.pad(q_pe, (0, 0, 0, 0, 0, pad_size))
-            q_c = torch.nn.functional.pad(q_c, (0, 0, 0, pad_size))
-            q_c_scale = torch.nn.functional.pad(
-                q_c_scale,
-                (0, 0) * (q_c_scale.ndim - 1) + (0, pad_size),
-            )
+        q_c = q_c.view(-1, q_c.shape[-1])
+        q_c_scale = q_c_scale.view(-1, q_c_scale.shape[-1])
 
         return hidden_states, decode_q_nope, q_pe, (q_c, q_c_scale)
 
@@ -856,6 +848,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         use_sparse_c8_indexer: bool,
         use_torch_npu_lightning_indexer: bool,
     ) -> torch.Tensor:
+        num_actual_tokens = attn_metadata.num_actual_tokens
         if use_sparse_c8_indexer:
             assert len(kv_cache) == 3
             topk_indices = None
@@ -864,14 +857,14 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             key_dequant_scale = kv_cache[2].squeeze(2)
 
             topk_indices = torch_npu.npu_quant_lightning_indexer(
-                query=q_li.view(q_li_shape_ori),
+                query=q_li.view(q_li_shape_ori)[:num_actual_tokens, ...],
                 key=kv_cache[1],
                 weights=weights,
-                query_dequant_scale=q_li_scale,
+                query_dequant_scale=q_li_scale[:num_actual_tokens, ...],
                 key_dequant_scale=key_dequant_scale,
                 actual_seq_lengths_query=actual_seq_lengths_query,
                 actual_seq_lengths_key=actual_seq_lengths_key,
-                block_table=attn_metadata.block_table,
+                block_table=attn_metadata.block_table[:num_actual_tokens, ...],
                 query_quant_mode=0,
                 key_quant_mode=0,
                 layout_query="TND",

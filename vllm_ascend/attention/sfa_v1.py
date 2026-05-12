@@ -975,6 +975,10 @@ class AscendSFAImpl(MLAAttentionImpl):
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
     ):
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        cos = cos[:num_actual_tokens]
+        sin = sin[:num_actual_tokens]
+
         if vllm_version_is("0.19.1"):
             weights, _ = self.weights_proj(x)
         else:
