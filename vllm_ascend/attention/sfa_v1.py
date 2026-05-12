@@ -975,6 +975,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         actual_seq_lengths_key: torch.Tensor,
     ):
         num_actual_tokens = attn_metadata.num_actual_tokens
+        x = x[:num_actual_tokens]
         cos = cos[:num_actual_tokens]
         sin = sin[:num_actual_tokens]
         
