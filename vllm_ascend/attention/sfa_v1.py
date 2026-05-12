@@ -335,12 +335,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
                 actual_seq_lengths_key=actual_seq_lengths_key,
             )
 
-        if not self.enable_dsa_cp and get_ascend_device_type() == AscendDeviceType.A5:
-            num_real_reqs = int((cum_query_lens <= num_actual_tokens).sum().item())
-            cum_query_lens = cum_query_lens[:num_real_reqs]
-            seq_lens = seq_lens[:num_real_reqs]
-            seq_lens_cpu = seq_lens_cpu[:num_real_reqs]
-
         return self.metadata_cls(  # type: ignore
             num_input_tokens=common_attn_metadata.num_input_tokens,
             num_actual_tokens=num_actual_tokens,
