@@ -974,8 +974,16 @@ class AscendSFAImpl(MLAAttentionImpl):
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
     ):
-        kw, _ = self.wk_weights_proj(x)
-        weights = kw[:, self.head_dim :]
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        cos = cos[:num_actual_tokens]
+        sin = sin[:num_actual_tokens]
+
+        if vllm_version_is("0.19.1"):
+            weights, _ = self.weights_proj(x)
+        else:
+            kw, _ = self.wk_weights_proj(x)
+            weights = kw[:, self.head_dim :]
+
         q_li, _ = self.wq_b(q_c)  # [b,s,1536] @ [1536,64*128] = [b,s,64*128]
         q_li = q_li.view(-1, self.n_head, self.head_dim)  # [n_toks,64,128]
         if HAS_TRITON:
