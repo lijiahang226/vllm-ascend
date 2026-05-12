@@ -677,7 +677,6 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def _process_weights_for_fused_mlapo_a5(self, act_dtype: torch.dtype):
         weight_dq = self.fused_qkv_a_proj.weight.data[..., : self.q_lora_rank].contiguous()
-        self.weight_dq_cpu = weight_dq.cpu()
         self.weight_dq = torch_npu.npu_format_cast(weight_dq, 29)
 
         weight_uq_qr = self.q_proj.weight.data.contiguous()
@@ -685,11 +684,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.weight_uq_qr_scale = self.weight_uq_qr_scale.reshape(
             -1, self.weight_uq_qr_scale.shape[1] * self.weight_uq_qr_scale.shape[2]
         )
-        self.weight_uq_qr_cpu = weight_uq_qr.cpu()
         self.weight_uq_qr = torch_npu.npu_format_cast(weight_uq_qr, 29)
 
         weight_dkv_kr = self.fused_qkv_a_proj.weight.data[..., self.q_lora_rank :].contiguous()
-        self.weight_dkv_kr_cpu = weight_dkv_kr.cpu()
         self.weight_dkv_kr = torch_npu.npu_format_cast(weight_dkv_kr, 29)
 
         weight_scale = self.fused_qkv_a_proj.weight_scale
