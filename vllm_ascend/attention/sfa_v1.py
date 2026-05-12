@@ -1273,7 +1273,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 return result
             attn_output = result
 
-        output[...] = self.o_proj(attn_output)[0]
+        output[:attn_metadata.num_actual_tokens] = self.o_proj(attn_output)[0]
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 
