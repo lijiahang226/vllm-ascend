@@ -47,7 +47,6 @@ from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from .w8a8_pdmix import AscendW8A8PDMixFusedMoeMethod, AscendW8A8PDMixLinearMethod
 from .w8a8_static import AscendW8A8LinearMethod
 from .w8a16 import AscendW8A16LinearMethod
-from .w4a8mxfp import AscendW4A8MXFPDynamicLinearMethod, AscendW4A8MXFPDynamicFusedMoEMethod
 
 
 def is_mx_quant_type(instance: Any) -> bool:
@@ -56,8 +55,6 @@ def is_mx_quant_type(instance: Any) -> bool:
         AscendW8A8MXFP8DynamicLinearMethod,
         AscendW4A4MXFP4DynamicLinearMethod,
         AscendW4A4MXFP4DynamicFusedMoEMethod,
-        AscendW4A8MXFPDynamicLinearMethod,
-        AscendW4A8MXFPDynamicFusedMoEMethod
     )
     return isinstance(instance, MX_QUANT_TYPES)
 
@@ -89,6 +86,4 @@ __all__ = [
     "AscendFAQuantAttentionMethod",
     "AscendW4A4MXFP4DynamicLinearMethod",
     "AscendW4A4MXFP4DynamicFusedMoEMethod",
-    "AscendW4A8MXFPDynamicLinearMethod",
-    "AscendW4A8MXFPDynamicFusedMoEMethod",
 ]

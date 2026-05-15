@@ -78,7 +78,7 @@ class MoEQuantParams:
     def dispatch_with_quant(self) -> bool:
         # MXFP4 currently quantizes activations in the MoE MLP path, so
         # MC2 dispatch must remain unquantized for that mode.
-        return self.quant_type in (QuantType.W8A8, QuantType.W4A8, QuantType.MXFP8, QuantType.MXFP4)
+        return self.quant_type in (QuantType.W8A8, QuantType.W4A8, QuantType.MXFP8)
 
 
 __all__ = [
