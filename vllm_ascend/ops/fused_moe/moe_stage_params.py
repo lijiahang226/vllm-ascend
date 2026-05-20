@@ -73,7 +73,7 @@ class MoEQuantParams:
 
     @property
     def is_int_quant(self) -> bool:
-        return self.quant_type in (QuantType.W8A8, QuantType.W4A8)
+        return self.quant_type in (QuantType.W8A8, QuantType.W4A8, QuantType.MXFP8, QuantType.MXFP4)
 
     @property
     def use_w4a8_per_channel_gmm_swiglu(self) -> bool:

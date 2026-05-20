@@ -484,7 +484,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
 
         dynamic_scale_after_all2all = None
         if with_quant:
-            permutated_local_input_tokens, dynamic_scale = torch_npu.npu_dynamic_quant(permutated_local_input_tokens)
+            permutated_local_input_tokens, dynamic_scale = DeviceOperator.npu_dynamic_quant(permutated_local_input_tokens, use_mxfp_quant=True)
             _, dynamic_scale_after_all2all, permute2_ep_all_to_all_handle = async_all_to_all(
                 dynamic_scale, output_splits, input_splits, self.ep_group
             )
@@ -624,21 +624,27 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         # Early return if no local experts or no tokens
         if self.num_local_experts <= 1:
             return global_input_tokens, dynamic_scale_after_all2all, None
-
-        # Handle quantized case
-        if with_quant:
-            assert global_input_tokens_local_experts_indices is not None, (
-                "global_input_tokens_local_experts_indices must be provided"
-            )
-            dynamic_scale_after_all2all, _ = torch_npu.npu_moe_token_permute(
-                dynamic_scale_after_all2all.unsqueeze(-1), global_input_tokens_local_experts_indices
-            )
-            dynamic_scale_after_all2all = dynamic_scale_after_all2all.squeeze(-1)
-
-        # Non-quantized case
-        global_input_tokens, reversed_global_input_permutation_mapping = torch_npu.npu_moe_token_permute(
-            global_input_tokens, global_input_tokens_local_experts_indices
+        
+        assert global_input_tokens_local_experts_indices is not None, (
+            "global_input_tokens_local_experts_indices must be provided"
         )
+        
+        experts_indices_2d_copy = global_input_tokens_local_experts_indices.reshape(global_input_tokens_local_experts_indices.shape[0], 1)
+        dynamic_scale_fp8_copy = dynamic_scale_after_all2all.view(torch.float8_e8m0fnu) if with_quant is True else None
+
+        global_input_tokens, reversed_global_input_permutation_mapping, _, dynamic_scale_fp8_copy = torch_npu.npu_moe_init_routing_v2(
+            global_input_tokens, experts_indices_2d_copy,
+            scale=dynamic_scale_fp8_copy,
+            active_num=experts_indices_2d_copy.shape[0],
+            expert_num=self.num_local_experts,
+            expert_tokens_num_type=1,
+            expert_tokens_num_flag=True,
+            active_expert_range=[0, self.num_local_experts]
+        )
+        dynamic_scale_after_all2all = dynamic_scale_fp8_copy.view(torch.uint8) if with_quant is True else dynamic_scale_after_all2all
+
+        experts_indices_2d_copy.untyped_storage().resize_(0)
+
         return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
 
     def _combine_preprocess(
