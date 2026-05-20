@@ -829,8 +829,14 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 quant_scale_repo_mode=1 if use_c8 else 0,
                 query_norm_flag=True
             )
+
+            decode_q_nope = decode_q_nope.view(bsz, sfa_impl.num_heads, sfa_impl.kv_lora_rank)
+            q_pe = q_pe.view(bsz, sfa_impl.num_heads, 64)
+            q_c = q_c.view(-1, q_c.shape[-1])
+            q_c_scale = q_c_scale.view(-1, q_c_scale.shape[-1])
+            return hidden_states, decode_q_nope, q_pe, (q_c, q_c_scale)
         else:
-            decode_q_nope, q_pe, _, q_c, q_c_scale = torch_npu.npu_mla_prolog_v3(
+            decode_q_nope, q_pe, _, q_c, _ = torch_npu.npu_mla_prolog_v3(
                 token_x=hidden_states_temp,
                 weight_dq=sfa_impl.weight_dq,
                 weight_uq_qr=sfa_impl.weight_uq_qr,
@@ -852,12 +858,10 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 query_norm_flag=True
             )
 
-        decode_q_nope = decode_q_nope.view(bsz, sfa_impl.num_heads, sfa_impl.kv_lora_rank)
-        q_pe = q_pe.view(bsz, sfa_impl.num_heads, 64)
-        q_c = q_c.view(-1, q_c.shape[-1])
-        q_c_scale = q_c_scale.view(-1, q_c_scale.shape[-1])
-
-        return hidden_states, decode_q_nope, q_pe, (q_c, q_c_scale) if q_c_scale is not None else q_c
+            decode_q_nope = decode_q_nope.view(bsz, sfa_impl.num_heads, sfa_impl.kv_lora_rank)
+            q_pe = q_pe.view(bsz, sfa_impl.num_heads, 64)
+            q_c = q_c.view(-1, q_c.shape[-1])
+            return hidden_states, decode_q_nope, q_pe, q_c
 
     @staticmethod
     def indexer_select_post_process(
@@ -876,27 +880,40 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         num_actual_tokens = attn_metadata.num_actual_tokens
         if use_sparse_c8_indexer:
             assert len(kv_cache) == 3
-            topk_indices = None
 
-            q_li_scale = q_li_scale.view(q_li_shape_ori[:-1])
-            key_dequant_scale = kv_cache[2].squeeze(2)
+            if q_li_scale is not None:
+                q_li_scale = q_li_scale.view(q_li_shape_ori[:-1])
+                key_dequant_scale = kv_cache[2].squeeze(2)
 
-            topk_indices = torch_npu.npu_quant_lightning_indexer(
-                query=q_li.view(q_li_shape_ori)[:num_actual_tokens, ...],
-                key=kv_cache[1],
-                weights=weights,
-                query_dequant_scale=q_li_scale[:num_actual_tokens, ...],
-                key_dequant_scale=key_dequant_scale,
-                actual_seq_lengths_query=actual_seq_lengths_query,
-                actual_seq_lengths_key=actual_seq_lengths_key,
-                block_table=attn_metadata.block_table[:num_actual_tokens, ...],
-                query_quant_mode=0,
-                key_quant_mode=0,
-                layout_query="TND",
-                layout_key="PA_BSND",
-                sparse_count=2048,
-                sparse_mode=3,
-            )
+                topk_indices = torch_npu.npu_quant_lightning_indexer(
+                    query=q_li.view(q_li_shape_ori)[:num_actual_tokens, ...],
+                    key=kv_cache[1],
+                    weights=weights,
+                    query_dequant_scale=q_li_scale[:num_actual_tokens, ...],
+                    key_dequant_scale=key_dequant_scale,
+                    actual_seq_lengths_query=actual_seq_lengths_query,
+                    actual_seq_lengths_key=actual_seq_lengths_key,
+                    block_table=attn_metadata.block_table[:num_actual_tokens, ...],
+                    query_quant_mode=0,
+                    key_quant_mode=0,
+                    layout_query="TND",
+                    layout_key="PA_BSND",
+                    sparse_count=2048,
+                    sparse_mode=3,
+                )
+            else:
+                topk_indices, _ = torch_npu.npu_lightning_indexer(
+                    query=q_li.view(q_li_shape_ori)[:num_actual_tokens, ...],
+                    key=kv_cache[1],
+                    weights=weights,
+                    actual_seq_lengths_query=actual_seq_lengths_query,
+                    actual_seq_lengths_key=actual_seq_lengths_key,
+                    block_table=attn_metadata.block_table[:num_actual_tokens, ...],
+                    layout_query="TND",
+                    layout_key="PA_BSND",
+                    sparse_count=2048,
+                    sparse_mode=3,
+                )
         else:
             topk_indices, _ = torch_npu.npu_lightning_indexer(
                 query=q_li,
