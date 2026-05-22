@@ -925,7 +925,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         sin: torch.Tensor,
         slot_mapping: torch.Tensor,
         num_input_tokens: int,
-        num_actual_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         return DeviceOperator.sfa_preprocess_with_mlapo(
             self,
@@ -935,7 +934,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             sin,
             slot_mapping,
             num_input_tokens,
-            num_actual_tokens
         )
 
     def indexer_select_pre_process(
@@ -993,11 +991,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
     ):
-        num_actual_tokens = attn_metadata.num_actual_tokens
-        x = x[:num_actual_tokens]
-        cos = cos[:num_actual_tokens]
-        sin = sin[:num_actual_tokens]
-
         if vllm_version_is("0.19.1"):
             weights, _ = self.weights_proj(x)
         else:
@@ -1101,8 +1094,6 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         # run mlapo ops when dsa-cp is disabled, and ensure that num_tokens satisfies the count limitation
         if self.enable_mlapo:
-            num_actual = attn_metadata.num_actual_tokens
-
             hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_with_mlapo(
                 hidden_states=hidden_states,
                 kv_cache=kv_cache,
@@ -1110,13 +1101,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 sin=sin,
                 slot_mapping=slot_mapping,
                 num_input_tokens=num_input_tokens,
-                num_actual_tokens=num_actual,
             )
-            k_li, k_li_scale = self.indexer_select_pre_process(
-                x=hidden_states[:num_actual],
-                cos=cos[:num_actual],
-                sin=sin[:num_actual],
-            )
+            k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
             wait_for_kv_layer_from_connector(layer_name)
         # native
         else:
@@ -1236,8 +1222,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             
             torch_npu.npu_scatter_nd_update_(
                 kv_cache[dsa_k_cache_idx].view(-1, k_li.shape[-1]),
-                slot_mapping[:attn_metadata.num_actual_tokens].view(-1, 1),
-                k_li[:attn_metadata.num_actual_tokens].view(-1, k_li.shape[-1])
+                slot_mapping.view(-1, 1),
+                k_li.view(-1, k_li.shape[-1])
             )  # b, s, n, d
             if self.use_sparse_c8_indexer:
                 if get_ascend_device_type() == AscendDeviceType.A5:
@@ -1247,8 +1233,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 if k_li_scale is not None:
                     torch_npu.npu_scatter_nd_update_(
                         kv_cache[dsa_k_scale_cache_idx].view(-1, k_li_scale.shape[-1]),
-                        slot_mapping[:attn_metadata.num_actual_tokens].view(-1, 1),
-                        k_li_scale[:attn_metadata.num_actual_tokens].view(-1, k_li_scale.shape[-1]),
+                        slot_mapping.view(-1, 1),
+                        k_li_scale.view(-1, k_li_scale.shape[-1]),
                     )
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
@@ -1291,7 +1277,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 return result
             attn_output = result
 
-        output[:attn_metadata.num_actual_tokens] = self.o_proj(attn_output)[0]
+        output[...] = self.o_proj(attn_output)[0]
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 

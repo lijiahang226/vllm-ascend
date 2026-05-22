@@ -778,11 +778,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         sin: torch.Tensor,
         slot_mapping: torch.Tensor,
         num_input_tokens: int,
-        num_actual_tokens: int,
     ) -> tuple:
-        total = hidden_states.shape[0]
-        del num_input_tokens
-        bsz = num_actual_tokens
+        bsz = num_input_tokens
         slot_mapping = slot_mapping[:bsz]
         hidden_states_temp = hidden_states[:bsz].unsqueeze(1)
         cos = cos[:bsz, ...]
@@ -877,7 +874,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         use_sparse_c8_indexer: bool,
         use_torch_npu_lightning_indexer: bool,
     ) -> torch.Tensor:
-        num_actual_tokens = attn_metadata.num_actual_tokens
         if use_sparse_c8_indexer:
             assert len(kv_cache) == 3
 
@@ -886,14 +882,14 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 key_dequant_scale = kv_cache[2].squeeze(2)
 
                 topk_indices = torch_npu.npu_quant_lightning_indexer(
-                    query=q_li.view(q_li_shape_ori)[:num_actual_tokens, ...],
+                    query=q_li.view(q_li_shape_ori),
                     key=kv_cache[1],
                     weights=weights,
-                    query_dequant_scale=q_li_scale[:num_actual_tokens, ...],
+                    query_dequant_scale=q_li_scale,
                     key_dequant_scale=key_dequant_scale,
                     actual_seq_lengths_query=actual_seq_lengths_query,
                     actual_seq_lengths_key=actual_seq_lengths_key,
-                    block_table=attn_metadata.block_table[:num_actual_tokens, ...],
+                    block_table=attn_metadata.block_table,
                     query_quant_mode=0,
                     key_quant_mode=0,
                     layout_query="TND",
@@ -903,12 +899,12 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 )
             else:
                 topk_indices, _ = torch_npu.npu_lightning_indexer(
-                    query=q_li.view(q_li_shape_ori)[:num_actual_tokens, ...],
+                    query=q_li.view(q_li_shape_ori),
                     key=kv_cache[1],
                     weights=weights,
                     actual_seq_lengths_query=actual_seq_lengths_query,
                     actual_seq_lengths_key=actual_seq_lengths_key,
-                    block_table=attn_metadata.block_table[:num_actual_tokens, ...],
+                    block_table=attn_metadata.block_table,
                     layout_query="TND",
                     layout_key="PA_BSND",
                     sparse_count=2048,
