@@ -1190,59 +1190,34 @@ class MooncakeConnectorWorker:
         _, first_kv_cache_tuple = next(iter(kv_caches.items()))
         first_kv_cache = first_kv_cache_tuple[0]
 
-        # Detect MLA, sparse, and sparse C8
+        # TODO(tms): Find a more robust way to detect and handle MLA
         self.use_mla = (
-            first_kv_cache_tuple[0].size(-1) != first_kv_cache_tuple[1].size(-1)
-            and len(first_kv_cache_tuple) == 2
+            first_kv_cache_tuple[0].size(-1) != first_kv_cache_tuple[1].size(-1) and len(first_kv_cache_tuple) == 2
         )
-
-        # Detect sparse C8 vs non-C8 sparse
-        # A5 sparse C8: 3 tensors (ckv, qli_tensor, qli_scale)
-        # A3 sparse C8: 4 tensors (kv_lora, k_rope, qli_tensor, qli_scale)
-        # Non-C8 sparse: 3 tensors (kv_lora, k_rope, dsa_k)
-        if len(first_kv_cache_tuple) == 4:
-            self.use_sparse = True
-            self.use_sparse_c8 = True
-        elif len(first_kv_cache_tuple) == 3:
-            # Check if it's sparse C8 by examining the third tensor's dtype
-            # A5 sparse C8: third tensor is qli_scale (float32)
-            # Non-C8 sparse: third tensor is dsa_k (bfloat16)
-            third_tensor = first_kv_cache_tuple[2]
-            if third_tensor.dtype in [torch.float32, torch.float16]:
-                self.use_sparse = True
-                self.use_sparse_c8 = True
-            else:
-                self.use_sparse = True
-                self.use_sparse_c8 = False
-        else:
-            self.use_sparse = False
-            self.use_sparse_c8 = False
+        self.use_sparse = len(first_kv_cache_tuple) == 3
 
         self.num_blocks = first_kv_cache.shape[0]
         logger.info("num_blocks: %s", self.num_blocks)
         self.block_len = []
-
         if self.use_mla or self.use_sparse:
-            # For sparse and MLA, each tensor may have different shapes
+            block_rank = 3  # [block_size, latent_dim]
             for i in range(len(first_kv_cache_tuple)):
-                cache = first_kv_cache_tuple[i]  # FIX: use tuple, not first_kv_cache
-                # Get the shape excluding the num_blocks dimension
-                # Shape: (num_blocks, block_size, num_kv_heads, head_dim)
-                block_shape = cache.shape[1:]  # (block_size, num_kv_heads, head_dim)
-                logger.info("block_shape for tensor %d: %s", i, block_shape)
-                self.block_len.append(cache.element_size() * math.prod(block_shape))
+                block_shape = first_kv_cache_tuple[i].shape[-block_rank:]
+                logger.info("block_shape: %s", block_shape)
+                self.block_len.append(first_kv_cache[i].element_size() * math.prod(block_shape))
         else:
             # eager:[num_block, block_size, num_head, hidden_dim]
-            block_rank = len(first_kv_cache.shape) - 1
+            block_rank = (
+                len(first_kv_cache.shape) - 1
+            )  # [block_size, kv_heads, head_dim] or [block_size, kv_heads*head_dim]
             block_shape = first_kv_cache.shape[-block_rank:]
             logger.info("block_shape: %s", block_shape)
             self.block_len = [first_kv_cache.element_size() * math.prod(block_shape)]
 
         logger.info(
-            "Registering KV_Caches. use_mla: %s, use_sparse: %s, use_sparse_c8: %s, shape %s",
+            "Registering KV_Caches. use_mla: %s, use_sparse: %s, shape %s",
             self.use_mla,
             self.use_sparse,
-            self.use_sparse_c8,
             first_kv_cache.shape,
         )
 
