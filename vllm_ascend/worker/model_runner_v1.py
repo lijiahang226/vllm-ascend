@@ -1732,9 +1732,23 @@ class NPUModelRunner(GPUModelRunner):
                 ),
             ) as kv_connector_output,
         ):
+            self._log_attention_kv_cache_stats(
+                            req_ids,
+                            None,
+                            log_prefix="KV cache stats",
+                            include_last_token=True,
+                )
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
+            if self.is_kv_producer:
+                torch.npu.synchronize()
+                self._log_attention_kv_cache_stats(
+                    req_ids,
+                    tokens,
+                    log_prefix="P node generated KV cache stats",
+                    include_last_token=self.use_hybrid_blocks,
+                )
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
