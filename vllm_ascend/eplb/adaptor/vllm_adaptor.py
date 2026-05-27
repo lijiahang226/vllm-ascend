@@ -81,7 +81,7 @@ class VllmEplbAdaptor:
         #     else:
         #         raise ValueError(f"EPLB not support {quant_type}")
         # else:
-        self.expert_weight_names = ["w13_weight", "w2_weight"]
+        self.expert_weight_names = ["w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"]
 
         for layer_idx in range(self.num_dense_layers, self.config.num_hidden_layers):
             self.expert_param_per_layer[layer_idx] = list()
