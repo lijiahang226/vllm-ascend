@@ -25,6 +25,7 @@ from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedD
 from vllm.distributed.parallel_state import get_pp_group
 >>>>>>> 15776a4b0 (fix bugs)
 from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
+
 try:
     from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MultiTokenPredictor
     from vllm.sequence import IntermediateTensors
@@ -181,10 +182,12 @@ if Qwen3_5MultiTokenPredictor is not None:
         )
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors({
-                "hidden_states": hidden_states,
-                "residual": residual,
-            })
+            return IntermediateTensors(
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                }
+            )
 
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
