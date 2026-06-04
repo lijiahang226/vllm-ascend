@@ -112,6 +112,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
     # Whether to use MultiBlockPool for KV cache management
     "VLLM_ASCEND_APPLY_DSV4_PATCH": lambda: bool(int(os.getenv("VLLM_ASCEND_APPLY_DSV4_PATCH", "0"))),
+    # Whether to use NPU device for DP metadata all_reduce communication.
+    # "1": use NPU device group, "0" (default): use CPU group.
+    "VLLM_ASCEND_DP_ALLREDUCE_ON_NPU": lambda: bool(int(os.getenv("VLLM_ASCEND_DP_ALLREDUCE_ON_NPU", "0"))),
 }
 
 # end-env-vars-definition
