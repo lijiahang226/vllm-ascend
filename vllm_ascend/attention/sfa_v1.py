@@ -7,7 +7,7 @@ import torch_npu
 import vllm.envs as envs_vllm
 from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group, get_pcp_group
+from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
@@ -33,7 +33,6 @@ from vllm_ascend.attention.utils import (
     trans_rope_weight,
     transdata,
     wait_for_kv_layer_from_connector,
-    split_decodes_and_prefills
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
@@ -55,7 +54,6 @@ from vllm_ascend.utils import (
     enable_dsa_cp,
     enable_dsa_cp_with_layer_shard,
     enable_dsa_cp_with_o_proj_tp,
-    enable_dsa_cp_with_pcp_shard,
     enable_sp,
     get_ascend_device_type,
     get_weight_prefetch_method,
@@ -246,9 +244,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         num_input_tokens = common_attn_metadata.num_input_tokens
-        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-            split_decodes_and_prefills(common_attn_metadata, decode_threshold=self.decode_threshold)
-        )
 
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
@@ -353,7 +348,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         return self.metadata_cls(  # type: ignore
             num_input_tokens=common_attn_metadata.num_input_tokens,
             num_actual_tokens=num_actual_tokens,
-            num_decode_tokens=num_decode_tokens,
             cum_query_lens=cum_query_lens,
             seq_lens=seq_lens,
             seq_lens_cpu=seq_lens_cpu,
@@ -393,9 +387,6 @@ class AscendSFAImpl(MLAAttentionImpl):
     # Supports forward using the all-gather o_proj weight for decode requests when Sharded CP is enabled.
     o_proj_full_pool: torch.Tensor | None = None
     o_proj_full_weight_scale_pool: torch.Tensor | None = None
-
-    # Supports forward using the all-gather o_proj weight when PCP shard is enabled.
-    o_proj_pcp_full_pool: torch.Tensor | None = None
 
     # q_hadamard and k_hadamard tensor shared when dsa c8 enabled
     q_hadamard: torch.Tensor | None = None
@@ -500,13 +491,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp()
         self._o_proj_dynamic_quant = False
 
-        # use original PCP o_proj weight in PD mix stage, and full gather
-        # for o_proj weight for prefill stage.
-        self.enable_dsa_cp_with_pcp_shard = enable_dsa_cp_with_pcp_shard()
-        if self.enable_dsa_cp_with_pcp_shard:
-            self.pcp_shard_size = get_pcp_group().world_size
-
-
         if self.enable_dsa_cp:
             self.local_num_heads = self.num_heads * self.tp_size
             if self.enable_dsa_cp_with_layer_shard:
@@ -581,9 +565,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                         post_process_after_loading_for_shard_weight_series(layer)
             else:
                 self._maybe_init_o_proj_tp_full_params()
-
-        if self.enable_dsa_cp_with_pcp_shard:
-            self._init_o_proj_pcp_shard_params()
 
         if self.enable_mlapo:
             quant_method = getattr(
