@@ -785,8 +785,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
 
         # Save TP-mode parameters (original sharded weights)
-        self.o_proj_tp_weight = self.o_proj.weight.clone().detach()
-        self.o_proj_tp_weight_scale = self.o_proj.weight_scale.clone().detach()
+        self.o_proj_tp_weight = self.o_proj.weight.clone().detach().contiguous()
+        self.o_proj_tp_weight_scale = self.o_proj.weight_scale.clone().detach().contiguous()
 
         # Initially switch to TP mode for graph capture
         self.o_proj.weight.set_(self.o_proj_tp_weight)
