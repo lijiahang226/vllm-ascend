@@ -1878,13 +1878,14 @@ class NPUModelRunner(GPUModelRunner):
                     num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
                 )
 
-                logger.debug(
-                    "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
-                    "should_ubatch: %s, num_tokens_across_dp: %s",
+                logger.info(
+                    "execute_model dp_rank=%d cudagraph_mode=%s batch_desc_num_tokens=%d "
+                    "dp_max_tokens=%d has_graph=%s",
+                    self.dp_rank,
                     cudagraph_mode,
-                    batch_desc,
-                    should_ubatch,
-                    num_tokens_across_dp,
+                    batch_desc.num_tokens,
+                    int(num_tokens_across_dp.max().item()) if num_tokens_across_dp is not None else num_tokens_unpadded,
+                    cudagraph_mode != CUDAGraphMode.NONE,
                 )
 
                 num_tokens_padded = batch_desc.num_tokens
