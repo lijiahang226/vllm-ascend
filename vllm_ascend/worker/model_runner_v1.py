@@ -1879,13 +1879,17 @@ class NPUModelRunner(GPUModelRunner):
                 )
 
                 logger.info(
-                    "execute_model dp_rank=%d cudagraph_mode=%s batch_desc_num_tokens=%d "
-                    "dp_max_tokens=%d has_graph=%s",
+                    "execute_model dp_rank=%d num_reqs=%d num_tokens_unpadded=%d "
+                    "cudagraph_mode=%s batch_desc_num_tokens=%d "
+                    "dp_max_tokens=%d has_graph=%s reason=%s",
                     self.dp_rank,
+                    num_reqs,
+                    num_tokens_unpadded,
                     cudagraph_mode,
                     batch_desc.num_tokens,
                     int(num_tokens_across_dp.max().item()) if num_tokens_across_dp is not None else num_tokens_unpadded,
                     cudagraph_mode != CUDAGraphMode.NONE,
+                    _get_no_graph_reason(cudagraph_mode, num_tokens_unpadded, self.model_config.enforce_eager),
                 )
 
                 num_tokens_padded = batch_desc.num_tokens
@@ -4536,6 +4540,15 @@ def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
     This ensures all ranks send consistent values (all padded or all unpadded).
     """
     return int(tensor[1, :].min().item())
+
+
+def _get_no_graph_reason(cudagraph_mode, num_tokens_unpadded, enforce_eager):
+    """Return a human-readable reason why this DP rank is not running in graph mode."""
+    if cudagraph_mode != CUDAGraphMode.NONE:
+        return "graph_active"
+    if enforce_eager:
+        return "enforce_eager"
+    return f"graph_miss(num_tokens={num_tokens_unpadded})"
 
 
 def _get_gpu_model_runner_module_name(model_runner) -> str:
