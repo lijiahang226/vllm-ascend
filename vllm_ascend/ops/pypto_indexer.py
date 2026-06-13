@@ -72,109 +72,6 @@ def _log_pypto_arg_dtypes(**named_tensors) -> None:
     logger.info("pypto_indexer arg dtypes: %s", _dtypes)
 
 
-def _build_pg_buffer_from_contiguous_cache(
-    k_cache: torch.Tensor,
-    k_scale_cache: torch.Tensor,
-    head_dim: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Convert contiguous vllm-ascend kv cache tensors into a PG-compatible buffer.
-
-    vllm-ascend stores k_cache (fp8) and k_scale_cache (fp32) as separate contiguous tensors
-    with shape (block_num, block_size, n_kv, head_dim or 1). The pypto PG kernel expects
-    them packed in a single uint8 buffer with interleaved layout.
-
-    Returns:
-        pg_buffer: uint8 tensor containing packed cache data
-        k_cache_pg: PG-compatible strided view for k_cache
-        k_scale_cache_pg: PG-compatible strided view for k_scale_cache
-    """
-    block_num, block_size, n_kv, hd = k_cache.shape
-    d = head_dim
-
-    fp8_data_per_block = block_size * n_kv * d       # fp8 elements
-    fp8_offset = fp8_data_per_block                   # skip padding
-    fp32_offset_bytes = block_size * n_kv * 2 * d     # skip to fp32 section
-    fp32_vals = block_size * n_kv                     # fp32 elements per block
-
-    total_uint8_per_block = fp32_offset_bytes + fp32_vals * 4 + fp8_offset
-    pg_buffer = torch.zeros(block_num, total_uint8_per_block, dtype=torch.uint8, device=k_cache.device)
-
-    # Copy k_cache into pg_buffer fp8 section
-    k_section = pg_buffer.view(torch.float8_e4m3fn)[:, fp8_offset:fp8_offset + fp8_data_per_block]
-    k_section_4d = k_section.view(block_num, block_size, n_kv, hd)
-    k_section_4d.copy_(k_cache.view(block_num, block_size, n_kv, hd))
-
-    # Copy k_scale_cache into pg_buffer fp32 section
-    ks_start = fp32_offset_bytes // 4
-    ks_end = (fp32_offset_bytes + fp32_vals * 4) // 4
-    ks_section = pg_buffer.view(torch.float32)[:, ks_start:ks_end]
-    ks_section_4d = ks_section.view(block_num, block_size, n_kv, 1)
-    ks_section_4d.copy_(k_scale_cache.view(block_num, block_size, n_kv, 1))
-
-    # PG page_size: offset to reach fp32 section, in units of (n_kv * block_size) elements
-    page_size = fp32_offset_bytes // (n_kv * block_size)
-
-    # Create strided PG-compatible views (non-contiguous by construction)
-    k_cache_pg = pg_buffer.view(torch.float8_e4m3fn)
-    k_cache_pg = torch.as_strided(
-        k_cache_pg,
-        size=(block_num, block_size, n_kv, page_size),
-        stride=(block_size * n_kv * page_size, n_kv * page_size, page_size, 1),
-    )
-    k_scale_pg = pg_buffer.view(torch.float32)
-    k_scale_pg = torch.as_strided(
-        k_scale_pg,
-        size=(block_num, block_size, n_kv, page_size // 4),
-        stride=(block_size * n_kv * page_size // 4, n_kv * page_size // 4, page_size // 4, 1),
-    )
-
-    return pg_buffer, k_cache_pg, k_scale_pg
-
-
-def _extract_from_pg_buffer(
-    pg_buffer: torch.Tensor,
-    k_cache: torch.Tensor,
-    k_scale_cache: torch.Tensor,
-    head_dim: int,
-) -> None:
-    """Extract updated k_cache and k_scale from PG buffer back to vllm-ascend tensors."""
-    block_num, block_size, n_kv, hd = k_cache.shape
-    d = head_dim
-
-    fp8_data_per_block = block_size * n_kv * d
-    fp8_offset = fp8_data_per_block
-    fp32_offset_bytes = block_size * n_kv * 2 * d
-    fp32_vals = block_size * n_kv
-
-    k_section = pg_buffer.view(torch.float8_e4m3fn)[:, fp8_offset:fp8_offset + fp8_data_per_block]
-    k_cache.view(block_num, block_size, n_kv, hd).copy_(k_section.view(block_num, block_size, n_kv, hd))
-
-    ks_start = fp32_offset_bytes // 4
-    ks_end = (fp32_offset_bytes + fp32_vals * 4) // 4
-    ks_section = pg_buffer.view(torch.float32)[:, ks_start:ks_end]
-    k_scale_cache.view(block_num, block_size, n_kv, 1).copy_(ks_section.view(block_num, block_size, n_kv, 1))
-
-
-def _compute_pg_cache_indices(
-    cache_index: torch.Tensor,
-    block_size: int,
-    k_cache_shape_per_block: int,
-    n_kv: int,
-    storage_offset: int,
-    element_size: int,
-) -> torch.Tensor:
-    """Compute PG-compatible cache indices from flat slot_mapping."""
-    # Formula from pypto test: cache_index // block_size * (cache_dim) * block_size + cache_index % block_size + offset
-    # For fp8: cache_dim = k_cache_shape[-1] // head_dim
-    # For fp32 scale: similar with appropriate units
-    t = cache_index.shape[0]
-    block_idx = cache_index // block_size
-    offset_in_block = cache_index % block_size
-    pg_index = block_idx * k_cache_shape_per_block * block_size + offset_in_block + storage_offset // element_size
-    return pg_index.view(t, 1)
-
-
 def _pg_adapter_forward(
     x: torch.Tensor,
     q_c: torch.Tensor,
@@ -197,24 +94,14 @@ def _pg_adapter_forward(
     head_num = w_proj.shape[1]
     block_num, block_size, n_kv, head_dim = k_cache.shape
 
-    pg_buffer, k_cache_pg, k_scale_pg = _build_pg_buffer_from_contiguous_cache(
-        k_cache, k_scale_cache, head_dim,
-    )
+    pg_cache_index = (slot_mapping // block_size) * (block_size * head_dim) + (slot_mapping % block_size)
+    pg_cache_index = pg_cache_index.view(t, 1)
 
-    page_size = block_size * n_kv * 2 * head_dim // (n_kv * block_size)
-    k_storage_offset = block_size * n_kv * head_dim
+    pg_scale_cache_index = (slot_mapping // block_size) * block_size + (slot_mapping % block_size)
+    pg_scale_cache_index = pg_scale_cache_index.view(t, 1)
 
-    pg_cache_index = _compute_pg_cache_indices(
-        slot_mapping, block_size, page_size // head_dim, n_kv, k_storage_offset, 1,
-    )
-
-    k_scale_storage_offset = block_size * n_kv * 2 * head_dim // 4
-    pg_scale_cache_index = _compute_pg_cache_indices(
-        slot_mapping, block_size, page_size // 4, n_kv, k_scale_storage_offset * 4, 4,
-    )
-
-    k_cache_input = k_cache_pg.view(block_num, block_size * (k_cache_pg.shape[-1] // head_dim), n_kv, head_dim)
-    k_scale_input = k_scale_pg.view(block_num, block_size * (k_scale_pg.shape[-1] // 1), n_kv, 1)
+    k_cache_input = k_cache.reshape(block_num, -1, n_kv, head_dim)
+    k_scale_input = k_scale_cache.reshape(block_num, -1, n_kv, 1)
 
     q_fp8 = torch.empty((t * head_num, head_dim), device=x.device, dtype=torch.float8_e4m3fn)
     q_scale = torch.empty((t * head_num, 1), device=x.device, dtype=torch.float32)
@@ -239,8 +126,6 @@ def _pg_adapter_forward(
         pg_cache_index, pg_scale_cache_index,
         q_fp8, q_scale, k_cache_input, k_scale_input, weights,
     )
-
-    _extract_from_pg_buffer(pg_buffer, k_cache, k_scale_cache, head_dim)
 
     return q_fp8, q_scale, weights
 
