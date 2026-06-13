@@ -1089,7 +1089,30 @@ class AscendSFAImpl(MLAAttentionImpl):
         sin: torch.Tensor,
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
+        pypto_result: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ):
+        if pypto_result is not None:
+            q_fp8, q_scale, weights = pypto_result
+
+            t = attn_metadata.num_input_tokens
+            head_num = self.n_head
+            q_fp8 = q_fp8.view(t, head_num, -1)
+            q_scale = q_scale.view(t, head_num, 1)
+
+            return DeviceOperator.indexer_select_post_process(
+                self,
+                q_fp8,
+                q_scale,
+                q_fp8.shape,
+                weights,
+                kv_cache,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+                self.use_sparse_c8_indexer,
+                self.use_torch_npu_lightning_indexer,
+            )
+
         kw, _ = self.wk_weights_proj(x)
         weights = kw[:, self.head_dim :]
         if isinstance(q_c, tuple):
@@ -1229,6 +1252,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             AscendAttentionState.SpecDecoding,
         }
 
+        _pypto_result: tuple | None = None
+
         # run mlapo ops when dsa-cp is disabled, and ensure that num_tokens satisfies the count limitation
         if self.enable_mlapo and (
             get_ascend_device_type() == AscendDeviceType.A5 or num_input_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
@@ -1244,7 +1269,36 @@ class AscendSFAImpl(MLAAttentionImpl):
                 slot_mapping=slot_mapping,
                 num_input_tokens=num_input_tokens,
             )
-            k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
+
+            # A5 C8 quantized MLAPO: use pypto fused indexer prolog when available
+            use_pypto = (
+                get_ascend_device_type() == AscendDeviceType.A5
+                and self.use_sparse_c8_indexer
+                and isinstance(q_c, tuple)
+                and get_ascend_config().enable_pypto_indexer
+            )
+            if use_pypto:
+                try:
+                    from vllm_ascend.ops.pypto_indexer import has_pypto
+                except ImportError:
+                    has_pypto = lambda: False
+
+            if use_pypto and has_pypto():
+                _pypto_result = DeviceOperator.indexer_prolog_quant_mxfp8(
+                    self,
+                    hidden_states,
+                    q_c[0],
+                    q_c[1],
+                    cos,
+                    sin,
+                    kv_cache,
+                    slot_mapping,
+                    kv_cache[1].shape[1],
+                )
+                k_li, k_li_scale = None, None
+            else:
+                _pypto_result = None
+                k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
             wait_for_kv_layer_from_connector(layer_name)
         # native
         else:
@@ -1362,7 +1416,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                             fused_kv_no_split[: attn_metadata.num_actual_tokens],
                         )
 
-            k_li = self._get_full_kv(k_li, attn_metadata)
+            k_li = self._get_full_kv(k_li, attn_metadata) if k_li is not None else None
 
         if kv_cache is not None:
             if self.is_kv_producer:
@@ -1375,11 +1429,12 @@ class AscendSFAImpl(MLAAttentionImpl):
                 dsa_k_cache_idx = 2
                 dsa_k_scale_cache_idx = 3
 
-            torch_npu.npu_scatter_nd_update_(
-                kv_cache[dsa_k_cache_idx].view(-1, k_li.shape[-1]),
-                slot_mapping.view(-1, 1),
-                k_li.view(-1, k_li.shape[-1]),
-            )  # b, s, n, d
+            if k_li is not None:
+                torch_npu.npu_scatter_nd_update_(
+                    kv_cache[dsa_k_cache_idx].view(-1, k_li.shape[-1]),
+                    slot_mapping.view(-1, 1),
+                    k_li.view(-1, k_li.shape[-1]),
+                )
             if self.use_sparse_c8_indexer:
                 if get_ascend_device_type() == AscendDeviceType.A5:
                     assert len(kv_cache) == 3
@@ -1407,6 +1462,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 sin=sin,
                 actual_seq_lengths_query=actual_seq_lengths_query,
                 actual_seq_lengths_key=actual_seq_lengths_key,
+                pypto_result=_pypto_result,
             )
             if self.use_index_cache:
                 self._update_indexcache_topk_indices(topk_indices)

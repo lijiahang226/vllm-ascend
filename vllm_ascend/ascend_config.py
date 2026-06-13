@@ -253,6 +253,13 @@ class AscendConfig:
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
 
+        # Whether to use pypto fused LightningIndexerProlog operator in SFA attention.
+        # When enabled on A5 with C8 quantized MLAPO, replaces the per-op indexer prolog
+        # chain (wk_proj + k_norm + rope + hadamard + quant + scatter) with a single
+        # fused pypto kernel. Requires pypto to be installed.
+        # Default: False (use standard op chain).
+        self.enable_pypto_indexer = additional_config.get("enable_pypto_indexer", False)
+
         # Enable optimized reduce sampling scheme
         self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
 

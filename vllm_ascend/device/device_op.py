@@ -1624,6 +1624,56 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )
         return results
 
+    @staticmethod
+    def indexer_prolog_quant_mxfp8(
+        sfa_impl,
+        hidden_states: torch.Tensor,
+        q_c: torch.Tensor,
+        q_c_scale: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        kv_cache: tuple,
+        slot_mapping: torch.Tensor,
+        block_size: int,
+    ) -> tuple:
+        from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
+        from vllm_ascend.ops.pypto_indexer import lightning_indexer_prolog_quant_mxfp8 as _pypto_forward
+
+        head_num = sfa_impl.n_head
+        head_dim = sfa_impl.head_dim
+        q_lora_rank = sfa_impl.q_lora_rank
+
+        wk_weight_data = sfa_impl.wk_weights_proj.weight.data
+        wk = wk_weight_data[:head_dim, :].T.contiguous()
+        w_proj = wk_weight_data[head_dim:, :].T.contiguous()
+
+        q_norm = q_c.view(-1, q_lora_rank)
+        q_norm_scale = q_c_scale.view(q_c_scale.shape[0], -1, 2) if q_c_scale.dim() == 2 else q_c_scale
+
+        w_qb = sfa_impl.wq_b.weight
+        w_qb_scale = sfa_impl.wq_b.weight_scale
+        gamma_k = sfa_impl.k_norm.weight.data.view(1, head_dim)
+
+        q_fp8, q_scale, weights = _pypto_forward(
+            hidden_states,
+            q_norm,
+            q_norm_scale,
+            w_qb,
+            w_qb_scale,
+            wk,
+            w_proj,
+            gamma_k,
+            cos,
+            sin,
+            AscendSFAImpl.q_hadamard,
+            AscendSFAImpl.k_hadamard,
+            kv_cache[1],       # k_cache fp8
+            kv_cache[2],       # k_scale_cache fp32
+            slot_mapping,
+        )
+
+        return q_fp8, q_scale, weights
+
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:
     ascend_device_type = get_ascend_device_type()
