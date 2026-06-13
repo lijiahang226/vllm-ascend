@@ -1271,19 +1271,29 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
 
             # A5 C8 quantized MLAPO: use pypto fused indexer prolog when available
-            use_pypto = (
-                get_ascend_device_type() == AscendDeviceType.A5
-                and self.use_sparse_c8_indexer
-                and isinstance(q_c, tuple)
-                and get_ascend_config().enable_pypto_indexer
-            )
+            _pypto_cond_device = get_ascend_device_type() == AscendDeviceType.A5
+            _pypto_cond_c8 = self.use_sparse_c8_indexer
+            _pypto_cond_quant = isinstance(q_c, tuple)
+            _pypto_cond_config = get_ascend_config().enable_pypto_indexer
+            use_pypto = _pypto_cond_device and _pypto_cond_c8 and _pypto_cond_quant and _pypto_cond_config
+
+            _pypto_has_lib = False
             if use_pypto:
                 try:
                     from vllm_ascend.ops.pypto_indexer import has_pypto
+                    _pypto_has_lib = has_pypto()
                 except ImportError:
-                    has_pypto = lambda: False
+                    pass
 
-            if use_pypto and has_pypto():
+            logger.info(
+                "pypto_indexer layer=%s: A5=%s sparse_c8=%s quantized=%s config=%s "
+                "pypto_lib=%s -> active=%s",
+                self.layer_name,
+                _pypto_cond_device, _pypto_cond_c8, _pypto_cond_quant, _pypto_cond_config,
+                _pypto_has_lib, use_pypto and _pypto_has_lib,
+            )
+
+            if use_pypto and _pypto_has_lib:
                 _pypto_result = DeviceOperator.indexer_prolog_quant_mxfp8(
                     self,
                     hidden_states,
