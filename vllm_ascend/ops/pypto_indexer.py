@@ -9,8 +9,22 @@ from typing import Any
 import torch
 
 
+def _get_pypto_indexer_prolog_fn() -> Any:
+    if not _HAS_PYPTO:
+        return None
+
+    try:
+        from lightning_indexer_prolog_quant_mxfp8_impl import lightning_indexer_prolog_quant as _fn
+
+        return _fn
+    except ImportError:
+        pass
+
+    return None
+
+
 def has_pypto() -> bool:
-    return _HAS_PYPTO
+    return _HAS_PYPTO and _get_pypto_indexer_prolog_fn() is not None
 
 
 def register_pypto_indexer_op():
@@ -169,42 +183,36 @@ def _pg_adapter_forward(
     k_cache: torch.Tensor,
     k_scale_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
+    pypto_fn: Any,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     t = x.shape[0]
     head_num = w_proj.shape[1]
     block_num, block_size, n_kv, head_dim = k_cache.shape
 
-    # Build PG buffer and views
     pg_buffer, k_cache_pg, k_scale_pg = _build_pg_buffer_from_contiguous_cache(
         k_cache, k_scale_cache, head_dim,
     )
 
-    # Compute PG-compatible indices (flat slot_mapping → PG index)
-    k_storage_offset = block_size * n_kv * head_dim  # fp8 offset in bytes (element count = bytes for fp8)
-    k_scale_storage_offset = block_size * n_kv * 2 * head_dim // 4  # fp32 offset
-
-    # PG page_size to compute k_cache_shape_per_block
-    page_size = block_size * n_kv * 2 * head_dim // (n_kv * block_size)  # = 2 * head_dim
+    page_size = block_size * n_kv * 2 * head_dim // (n_kv * block_size)
+    k_storage_offset = block_size * n_kv * head_dim
 
     pg_cache_index = _compute_pg_cache_indices(
         slot_mapping, block_size, page_size // head_dim, n_kv, k_storage_offset, 1,
     )
+
+    k_scale_storage_offset = block_size * n_kv * 2 * head_dim // 4
     pg_scale_cache_index = _compute_pg_cache_indices(
         slot_mapping, block_size, page_size // 4, n_kv, k_scale_storage_offset * 4, 4,
     )
 
-    # Reshape for pypto: k_cache shape (block_num, block_size * cache_dim, n_kv, head_dim)
     k_cache_input = k_cache_pg.view(block_num, block_size * (k_cache_pg.shape[-1] // head_dim), n_kv, head_dim)
     k_scale_input = k_scale_pg.view(block_num, block_size * (k_scale_pg.shape[-1] // 1), n_kv, 1)
 
-    # Allocate output buffers
     q_fp8 = torch.empty((t * head_num, head_dim), device=x.device, dtype=torch.float8_e4m3fn)
     q_scale = torch.empty((t * head_num, 1), device=x.device, dtype=torch.float32)
     weights = torch.empty((t, head_num), device=x.device, dtype=torch.bfloat16)
 
-    from lightning_indexer_prolog_quant_mxfp8_impl import lightning_indexer_prolog_quant
-
-    lightning_indexer_prolog_quant(
+    pypto_fn(
         x, q_c, q_c_scale, w_qb, w_qb_scale, wk, w_proj, gamma_k,
         cos, sin, hadamard_q, hadamard_k,
         k_cache_input, k_scale_input,
@@ -212,7 +220,6 @@ def _pg_adapter_forward(
         q_fp8, q_scale, k_cache_input, k_scale_input, weights,
     )
 
-    # Extract updated k_cache / k_scale back
     _extract_from_pg_buffer(pg_buffer, k_cache, k_scale_cache, head_dim)
 
     return q_fp8, q_scale, weights
@@ -235,8 +242,16 @@ def lightning_indexer_prolog_quant_mxfp8(
     k_scale_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    pypto_fn = _get_pypto_indexer_prolog_fn()
+    if pypto_fn is None:
+        raise RuntimeError(
+            "lightning_indexer_prolog_quant_mxfp8_impl module not found. "
+            "Ensure the pypto indexer prolog kernel is compiled and the "
+            "containing directory is in PYTHONPATH."
+        )
     return _pg_adapter_forward(
         x, q_c, q_c_scale, w_qb, w_qb_scale, wk, w_proj, gamma_k,
         cos, sin, hadamard_q, hadamard_k,
         k_cache, k_scale_cache, slot_mapping,
+        pypto_fn,
     )
