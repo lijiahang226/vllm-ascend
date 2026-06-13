@@ -1647,11 +1647,12 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         wk = wk_weight_data[:head_dim, :].T.contiguous()
         w_proj = wk_weight_data[head_dim:, :].T.contiguous()
 
-        q_norm = q_c.view(-1, q_lora_rank)
-        q_norm_scale = q_c_scale.view(q_c_scale.shape[0], -1, 2) if q_c_scale.dim() == 2 else q_c_scale
+        q_norm = q_c.reshape(-1, q_lora_rank)
+        q_norm = _ensure_dtype(q_norm, torch.float8_e4m3fn, "q_norm")
+        q_norm_scale = _ensure_scale_dtype(q_c_scale, "q_norm_scale")
 
-        w_qb = sfa_impl.wq_b.weight
-        w_qb_scale = sfa_impl.wq_b.weight_scale
+        w_qb = _ensure_dtype(sfa_impl.wq_b.weight, torch.float8_e4m3fn, "w_qb")
+        w_qb_scale = _ensure_scale_dtype(sfa_impl.wq_b.weight_scale, "w_qb_scale")
         gamma_k = sfa_impl.k_norm.weight.data.view(1, head_dim)
 
         q_fp8, q_scale, weights = _pypto_forward(
@@ -1667,12 +1668,27 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             sin,
             AscendSFAImpl.q_hadamard,
             AscendSFAImpl.k_hadamard,
-            kv_cache[1],       # k_cache fp8
-            kv_cache[2],       # k_scale_cache fp32
+            kv_cache[1],
+            kv_cache[2],
             slot_mapping,
         )
 
         return q_fp8, q_scale, weights
+
+
+def _ensure_dtype(tensor: torch.Tensor, dtype: torch.dtype, name: str) -> torch.Tensor:
+    if tensor.dtype != dtype:
+        logger.warning("pypto_indexer: %s dtype=%s, converting to %s", name, tensor.dtype, dtype)
+        return tensor.to(dtype)
+    return tensor
+
+
+def _ensure_scale_dtype(tensor: torch.Tensor, name: str) -> torch.Tensor:
+    target = torch.float8_e8m0fnu
+    if tensor.dtype != target:
+        logger.warning("pypto_indexer: %s dtype=%s, converting to %s", name, tensor.dtype, target)
+        return tensor.to(target)
+    return tensor
 
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:

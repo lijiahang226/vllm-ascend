@@ -7,6 +7,7 @@ except ImportError:
 from typing import Any
 
 import torch
+from vllm.logger import logger
 
 
 def _get_pypto_indexer_prolog_fn() -> Any:
@@ -62,6 +63,13 @@ def register_pypto_indexer_op():
         q_scale = torch.empty((t * head_num, 1), device="meta", dtype=torch.float32)
         weights = torch.empty((t, head_num), device="meta", dtype=torch.bfloat16)
         return q_fp8, q_scale, k_cache, k_scale_cache, weights
+
+
+def _log_pypto_arg_dtypes(**named_tensors) -> None:
+    _dtypes = ", ".join(
+        f"{name}={t.dtype}" for name, t in named_tensors.items() if isinstance(t, torch.Tensor)
+    )
+    logger.info("pypto_indexer arg dtypes: %s", _dtypes)
 
 
 def _build_pg_buffer_from_contiguous_cache(
@@ -211,6 +219,18 @@ def _pg_adapter_forward(
     q_fp8 = torch.empty((t * head_num, head_dim), device=x.device, dtype=torch.float8_e4m3fn)
     q_scale = torch.empty((t * head_num, 1), device=x.device, dtype=torch.float32)
     weights = torch.empty((t, head_num), device=x.device, dtype=torch.bfloat16)
+
+    _log_pypto_arg_dtypes(
+        x=x, q_norm=q_c, q_norm_scale=q_c_scale,
+        w_qb=w_qb, w_qb_scale=w_qb_scale,
+        wk=wk, w_proj=w_proj, gamma_k=gamma_k,
+        cos=cos, sin=sin, hadamard_q=hadamard_q, hadamard_k=hadamard_k,
+        k_quant=k_cache_input, k_scale=k_scale_input,
+        k_cache_index=pg_cache_index, k_scale_cache_index=pg_scale_cache_index,
+        q_out=q_fp8, q_scale_out=q_scale,
+        k_out=k_cache_input, k_scale_out=k_scale_input,
+        w_out=weights,
+    )
 
     pypto_fn(
         x, q_c, q_c_scale, w_qb, w_qb_scale, wk, w_proj, gamma_k,
