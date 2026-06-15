@@ -20,6 +20,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 import torch_npu
+from vllm.logger import logger
 
 from vllm_ascend.device.mxfp_compat import (
     FLOAT8_E8M0FNU_DTYPE,
@@ -1476,6 +1477,12 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         key_rope = kv_cache[1]
 
         if kv.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
+            logger.info(
+                "A5 SFA kv_dtype=%s query_lens=%s key_lens=%s",
+                kv.dtype,
+                actual_seq_lengths_query.tolist(),
+                actual_seq_lengths_key.tolist(),
+            )
             query = torch.cat([ql_nope, q_pe], dim=-1)
 
             attn_output = torch_npu.npu_kv_quant_sparse_flash_attention(
@@ -1499,6 +1506,13 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 rope_head_dim=64,
             )
         else:
+            logger.info(
+                "A5 SFA kv_dtype=%s query_lens=%s key_lens=%s",
+                kv.dtype,
+                actual_seq_lengths_query.tolist(),
+                actual_seq_lengths_key.tolist(),
+            )
+
             attn_output, _, _ = torch_npu.npu_sparse_flash_attention(
                 query=ql_nope,
                 key=kv,
