@@ -24,7 +24,9 @@ from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.layer_shard_linear import is_hidden_layer, reach_layer_for_shard_weight_series
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.utils import (
+    AscendDeviceType,
     enable_dsa_cp_with_pcp_shard,
+    get_ascend_device_type,
     get_weight_prefetch_method,
 )
 
@@ -262,6 +264,7 @@ class AscendSFACPImpl(AscendSFAImpl):
 
     # Supports forward using the all-gather o_proj weight when PCP shard is enabled.
     o_proj_pcp_full_pool: torch.Tensor | None = None
+    o_proj_pcp_full_weight_scale_pool: torch.Tensor | None = None
 
     def __init__(
         self,
@@ -318,6 +321,36 @@ class AscendSFACPImpl(AscendSFAImpl):
         Each PCP rank holds 1/pcp_shard_size of o_proj weight (sharded along input_dim).
         At compute time, all-gather across PCP ranks to reconstruct full weight.
         """
+        if self._check_o_proj_dynamic_quant():
+            self._init_dynamic_quant_o_proj_pcp_shard_params()
+        else:
+            self._init_static_quant_o_proj_pcp_shard_params()
+
+    def _init_dynamic_quant_o_proj_pcp_shard_params(self):
+        """PCP shard params for MXFP8 dynamic quant (A5)."""
+        self._o_proj_dynamic_quant = True
+        if AscendSFACPImpl.o_proj_pcp_full_pool is None:
+            sample = self.o_proj.weight
+            AscendSFACPImpl.o_proj_pcp_full_pool = torch.empty(
+                (sample.shape[0] * self.pcp_shard_size, sample.shape[1]),
+                dtype=sample.dtype,
+                device=sample.device,
+            )
+        if AscendSFACPImpl.o_proj_pcp_full_weight_scale_pool is None:
+            sample = self.o_proj.weight_scale
+            AscendSFACPImpl.o_proj_pcp_full_weight_scale_pool = torch.empty(
+                (sample.shape[0] * self.pcp_shard_size, sample.shape[1], sample.shape[2]),
+                dtype=sample.dtype,
+                device=sample.device,
+            )
+
+        self.o_proj_pcp_shard_weight = self.o_proj.weight.clone().detach()
+        self.o_proj_pcp_shard_weight_scale = self.o_proj.weight_scale.clone().detach()
+
+        self.o_proj.weight.set_(self.o_proj_pcp_shard_weight)
+        self.o_proj.weight_scale.set_(self.o_proj_pcp_shard_weight_scale)
+
+    def _init_static_quant_o_proj_pcp_shard_params(self):
         if AscendSFACPImpl.o_proj_pcp_full_pool is None:
             sample = self.o_proj.weight
             AscendSFACPImpl.o_proj_pcp_full_pool = torch.empty(
@@ -747,21 +780,29 @@ class AscendSFACPImpl(AscendSFAImpl):
         if should_shard_weight:
             if o_proj_pcp_handle is not None:
                 o_proj_pcp_handle.wait()
-            # row split
-            # Switch o_proj to Full-mode (gathered weight from all PCP ranks)
-            self.o_proj.weight.set_(AscendSFACPImpl.o_proj_pcp_full_pool)
-            self.o_proj.aclnn_input_scale.set_(self.o_proj_pcp_full_aclnn_input_scale)
-            self.o_proj.aclnn_input_scale_reciprocal.set_(self.o_proj_pcp_full_aclnn_input_scale_reciprocal)
-            self.o_proj.aclnn_input_offset.set_(self.o_proj_pcp_full_aclnn_input_offset)
 
-            # Apply quantization method and execute forward computation
-            output[...] = self.o_proj.quant_method.quant_method.apply(self.o_proj, attn_output)
+            if getattr(self, "_o_proj_dynamic_quant", False):
+                # A5 MXFP8 dynamic quant: switch weight + weight_scale to full mode
+                self.o_proj.weight.set_(AscendSFACPImpl.o_proj_pcp_full_pool)
+                self.o_proj.weight_scale.set_(AscendSFACPImpl.o_proj_pcp_full_weight_scale_pool)
 
-            # Switch o_proj back to shard-mode
-            self.o_proj.weight.set_(self.o_proj_pcp_shard_weight)
-            self.o_proj.aclnn_input_scale.set_(self.o_proj_pcp_shard_aclnn_input_scale)
-            self.o_proj.aclnn_input_scale_reciprocal.set_(self.o_proj_pcp_shard_aclnn_input_scale_reciprocal)
-            self.o_proj.aclnn_input_offset.set_(self.o_proj_pcp_shard_aclnn_input_offset)
+                output[...] = self.o_proj.quant_method.quant_method.apply(self.o_proj, attn_output)
+
+                self.o_proj.weight.set_(self.o_proj_pcp_shard_weight)
+                self.o_proj.weight_scale.set_(self.o_proj_pcp_shard_weight_scale)
+            else:
+                # A3 static quant: switch weight + aclnn_input_scale/_reciprocal/_offset
+                self.o_proj.weight.set_(AscendSFACPImpl.o_proj_pcp_full_pool)
+                self.o_proj.aclnn_input_scale.set_(self.o_proj_pcp_full_aclnn_input_scale)
+                self.o_proj.aclnn_input_scale_reciprocal.set_(self.o_proj_pcp_full_aclnn_input_scale_reciprocal)
+                self.o_proj.aclnn_input_offset.set_(self.o_proj_pcp_full_aclnn_input_offset)
+
+                output[...] = self.o_proj.quant_method.quant_method.apply(self.o_proj, attn_output)
+
+                self.o_proj.weight.set_(self.o_proj_pcp_shard_weight)
+                self.o_proj.aclnn_input_scale.set_(self.o_proj_pcp_shard_aclnn_input_scale)
+                self.o_proj.aclnn_input_scale_reciprocal.set_(self.o_proj_pcp_shard_aclnn_input_scale_reciprocal)
+                self.o_proj.aclnn_input_offset.set_(self.o_proj_pcp_shard_aclnn_input_offset)
 
             return output, False
         else:
@@ -821,7 +862,9 @@ class AscendSFACPImpl(AscendSFAImpl):
             attn_metadata.prefill_kli_cache_event = torch.npu.Event()
 
         # run mlapo ops when dsa-cp is disabled, and ensure that num_tokens satisfies the count limitation
-        if self.enable_mlapo and num_input_tokens <= MLAPO_MAX_SUPPORTED_TOKENS:
+        if self.enable_mlapo and (
+            get_ascend_device_type() == AscendDeviceType.A5 or num_input_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
+        ):
             hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_with_mlapo(
                 hidden_states=hidden_states,
                 kv_cache=kv_cache,
