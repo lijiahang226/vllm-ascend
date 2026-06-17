@@ -19,11 +19,8 @@
 
 import torch
 from vllm.distributed import get_tensor_model_parallel_world_size
-<<<<<<< HEAD
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
-=======
 from vllm.distributed.parallel_state import get_pp_group
->>>>>>> 15776a4b0 (fix bugs)
 from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
 
 try:
