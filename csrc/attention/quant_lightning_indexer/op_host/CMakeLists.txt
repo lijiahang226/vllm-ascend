@@ -11,12 +11,12 @@ add_op_to_compiled_list()
 
 if (BUILD_OPEN_PROJECT)
     target_sources(op_host_aclnn PRIVATE
-        quant_lightning_indexer_def.cpp
+        quant_lightning_indexer_custom_def.cpp
      )
 endif()
 
 add_ops_compile_options(
-    OP_NAME QuantLightningIndexerCustom
+    OP_NAME QuantLightningIndexer
     OPTIONS --cce-auto-sync=off
             -Wno-deprecated-declarations
             -Werror

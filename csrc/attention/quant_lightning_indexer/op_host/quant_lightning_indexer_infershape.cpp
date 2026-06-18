@@ -100,7 +100,7 @@ static ge::graphStatus InferDataTypeQuantLightningIndexer(gert::InferDataTypeCon
     return GRAPH_SUCCESS;
 }
 
-IMPL_OP_INFERSHAPE(QuantLightningIndexerCustom)
+IMPL_OP_INFERSHAPE(QuantLightningIndexer)
     .InferShape(InferShapeQuantLightningIndexer)
     .InferDataType(InferDataTypeQuantLightningIndexer);
 }  // namespace ops
