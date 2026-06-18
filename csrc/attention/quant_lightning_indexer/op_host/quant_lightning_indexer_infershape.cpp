@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2026 Huawei Technologies Co., Ltd.
- * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
- * CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
- */
+ * Copyright (c) 2026 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
 
 /*!
  * \file quant_lightning_indexer_infershape.cpp
@@ -30,10 +30,10 @@ constexpr uint32_t ATTR_RETURN_VALUE_INDEX = 9;
 constexpr uint32_t DIM_NUM_3 = 3;
 constexpr uint32_t DIM_NUM_4 = 4;
 
-static ge::graphStatus InferShapeQuantLightningIndexerCustom(gert::InferShapeContext *context)
+static ge::graphStatus InferShapeQuantLightningIndexer(gert::InferShapeContext *context)
 {
     if (context == nullptr) {
-        OP_LOGE("QuantLightningIndexerCustom", "context is nullptr!");
+        OP_LOGE("QuantLightningIndexer", "context is nullptr!");
         return ge::GRAPH_FAILED;
     }
     const gert::Shape *queryShape = context->GetInputShape(QUERY_INDEX);
@@ -82,25 +82,25 @@ static ge::graphStatus InferShapeQuantLightningIndexerCustom(gert::InferShapeCon
         sparseValuesShape->SetDim(0, 0);
     }
 
-    OP_LOGD(context->GetNodeName(), "QuantLightningIndexerCustom InferShape end.");
+    OP_LOGD(context->GetNodeName(), "QuantLightningIndexer InferShape end.");
     return ge::GRAPH_SUCCESS;
 }
 
-static ge::graphStatus InferDataTypeQuantLightningIndexerCustom(gert::InferDataTypeContext *context)
+static ge::graphStatus InferDataTypeQuantLightningIndexer(gert::InferDataTypeContext *context)
 {
     if (context == nullptr) {
-        OP_LOGE("QuantLightningIndexerCustom", "InferDataTypeContext context is nullptr!");
+        OP_LOGE("QuantLightningIndexer", "InferDataTypeContext context is nullptr!");
         return ge::GRAPH_FAILED;
     }
-    OP_LOGD(context->GetNodeName(), "Enter QuantLightningIndexerCustom InferDataType impl.");
+    OP_LOGD(context->GetNodeName(), "Enter QuantLightningIndexer InferDataType impl.");
     // default index data type is int32
     ge::DataType outputType = ge::DT_INT32;
     context->SetOutputDataType(0, outputType);
-    OP_LOGD(context->GetNodeName(), "QuantLightningIndexerCustom InferDataType end.");
+    OP_LOGD(context->GetNodeName(), "QuantLightningIndexer InferDataType end.");
     return GRAPH_SUCCESS;
 }
 
 IMPL_OP_INFERSHAPE(QuantLightningIndexerCustom)
-    .InferShape(InferShapeQuantLightningIndexerCustom)
-    .InferDataType(InferDataTypeQuantLightningIndexerCustom);
+    .InferShape(InferShapeQuantLightningIndexer)
+    .InferDataType(InferDataTypeQuantLightningIndexer);
 }  // namespace ops
