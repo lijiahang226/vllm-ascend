@@ -18,7 +18,7 @@
 using namespace ge;
 
 namespace ops {
-static ge::graphStatus InferShapeQuantLightningIndexerMetaData(gert::InferShapeContext* context)
+static ge::graphStatus InferShapeQuantLightningIndexerMetadataCustom(gert::InferShapeContext* context)
 {
     gert::Shape* oShape = context->GetOutputShape(0);
     oShape->SetDimNum(1);
@@ -26,13 +26,13 @@ static ge::graphStatus InferShapeQuantLightningIndexerMetaData(gert::InferShapeC
     return GRAPH_SUCCESS;
 }
 
-static ge::graphStatus InferDtypeQuantLightningIndexerMetaData(gert::InferDataTypeContext* context)
+static ge::graphStatus InferDtypeQuantLightningIndexerMetadataCustom(gert::InferDataTypeContext* context)
 {
     context->SetOutputDataType(0, DT_INT32);
     return GRAPH_SUCCESS;
 }
 
-IMPL_OP_INFERSHAPE(QuantLightningIndexerMetadata)
-    .InferShape(InferShapeQuantLightningIndexerMetaData)
-    .InferDataType(InferDtypeQuantLightningIndexerMetaData);
+IMPL_OP_INFERSHAPE(QuantLightningIndexerMetadataCustom)
+    .InferShape(InferShapeQuantLightningIndexerMetadataCustom)
+    .InferDataType(InferDtypeQuantLightningIndexerMetadataCustom);
 } // namespace ops

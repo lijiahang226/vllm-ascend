@@ -16,9 +16,9 @@
 #include "register/op_def_registry.h"
 
 namespace ops {
-class QuantLightningIndexer : public OpDef {
+class QuantLightningIndexerCustom : public OpDef {
 public:
-    explicit QuantLightningIndexer(const char *name) : OpDef(name)
+    explicit QuantLightningIndexerCustom(const char *name) : OpDef(name)
     {
         this->Input("query")
             .ParamType(REQUIRED)
@@ -144,10 +144,10 @@ public:
             .NeedCheckSupportFlag(false)
             .PrecisionReduceFlag(true)
             .ExtendCfgInfo("aclnnSupport.value", "support_aclnn")
-            .ExtendCfgInfo("opFile.value", "quant_lightning_indexer")
+            .ExtendCfgInfo("opFile.value", "quant_lightning_indexer_custom")
             .ExtendCfgInfo("jitCompile.flag", "static_false,dynamic_false");
         this->AICore().AddConfig("ascend950", aicore_config_950);
     }
 };
-OP_ADD(QuantLightningIndexer);
+OP_ADD(QuantLightningIndexerCustom);
 }  // namespace ops

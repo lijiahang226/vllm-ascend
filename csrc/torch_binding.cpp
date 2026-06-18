@@ -1098,7 +1098,7 @@ std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_npu(
                     "key_dequant_scale must be contiguous on all axes except axis 0");
     }
 
-    EXEC_NPU_CMD(aclnnQuantLightningIndexer, query,
+    EXEC_NPU_CMD(aclnnQuantLightningIndexerCustom, query,
         key, weights, query_dequant_scale, key_dequant_scale, actual_seq_lengths_query, actual_seq_lengths_key,
         block_table, metadata, query_quant_mode, key_quant_mode, query_layout_ptr, key_layout_ptr, sparse_count, sparse_mode,
         pre_tokens, next_tokens, cmp_ratio, return_value, stride, scale_stride, sparse_indices_out, sparse_values_out);

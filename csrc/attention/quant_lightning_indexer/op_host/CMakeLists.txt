@@ -16,7 +16,7 @@ if (BUILD_OPEN_PROJECT)
 endif()
 
 add_ops_compile_options(
-    OP_NAME QuantLightningIndexer
+    OP_NAME QuantLightningIndexerCustom
     OPTIONS --cce-auto-sync=off
             -Wno-deprecated-declarations
             -Werror
