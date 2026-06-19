@@ -47,6 +47,10 @@ class BaseDeviceAdaptor:
         )
 
     @staticmethod
+    def indexer_prolog_quant(*args, **kwargs):
+        return None
+
+    @staticmethod
     def npu_moe_init_routing(
         hidden_states,
         topk_ids,
@@ -1436,6 +1440,66 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             q_pe = q_pe.view(bsz, sfa_impl.num_heads, -1)
             q_c = q_c.view(-1, q_c.shape[-1])
             return hidden_states, decode_q_nope, q_pe, q_c
+
+    @staticmethod
+    def indexer_prolog_quant(
+        sfa_impl,
+        x: torch.Tensor,
+        q_c: torch.Tensor | tuple,
+        kv_cache: tuple,
+        attn_metadata,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        from vllm_ascend.attention.lightning_indexer_prolog import (
+            HAS_PYPTO,
+            lightning_indexer_prolog_quant_mxfp8,
+        )
+
+        if not HAS_PYPTO:
+            return None
+
+        if not isinstance(q_c, tuple):
+            return None
+
+        q_c_tensor, q_c_scale = q_c
+        q_c_tensor = q_c_tensor.view(-1, q_c_tensor.shape[-1])
+        if q_c_scale.dim() == 2:
+            q_c_scale = q_c_scale.view(q_c_scale.shape[0], -1, 2)
+
+        head_dim = sfa_impl.head_dim
+        n_head = sfa_impl.n_head
+
+        wk_weight = sfa_impl.wk_weights_proj.weight[:head_dim, :]
+        w_proj_weight = sfa_impl.wk_weights_proj.weight[head_dim:, :]
+
+        num_tokens = x.shape[0]
+        slot_mapping_flat = slot_mapping.view(-1)[:num_tokens].to(torch.int64)
+
+        q_fp8, q_scale, _, _, weights = lightning_indexer_prolog_quant_mxfp8(
+            x=x,
+            q_norm=q_c_tensor,
+            q_norm_scale=q_c_scale,
+            w_qb=sfa_impl.wq_b.weight,
+            w_qb_scale=sfa_impl.wq_b.weight_scale,
+            wk=wk_weight,
+            w_proj=w_proj_weight,
+            gamma_k=sfa_impl.k_norm.weight,
+            cos_idx_rope=cos,
+            sin_idx_rope=sin,
+            hadamard_q=sfa_impl.q_hadamard,
+            hadamard_k=sfa_impl.k_hadamard,
+            k_cache=kv_cache[1],
+            k_scale_cache=kv_cache[2],
+            k_cache_index=slot_mapping_flat,
+            k_scale_cache_index=slot_mapping_flat,
+        )
+
+        q_fp8 = q_fp8.view(num_tokens, n_head, head_dim)
+        q_scale = q_scale.view(num_tokens, n_head)
+
+        return q_fp8, q_scale, weights
 
     @staticmethod
     def indexer_select_post_process(

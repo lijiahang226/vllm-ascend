@@ -1274,6 +1274,54 @@ class AscendSFAImpl(MLAAttentionImpl):
 
             k_li = self._get_full_kv(k_li, attn_metadata)
 
+        prolog_result = None
+        if (
+            kv_cache is not None
+            and self.use_sparse_c8_indexer
+            and get_ascend_device_type() == AscendDeviceType.A5
+            and isinstance(q_c, tuple)
+        ):
+            prolog_result = DeviceOperator.indexer_prolog_quant(
+                sfa_impl=self,
+                x=hidden_states,
+                q_c=q_c,
+                kv_cache=kv_cache,
+                attn_metadata=attn_metadata,
+                cos=cos,
+                sin=sin,
+                slot_mapping=slot_mapping,
+            )
+
+        if prolog_result is not None:
+            q_li, q_li_scale, weights = prolog_result
+            q_li_shape_ori = q_li.shape
+            topk_indices = DeviceOperator.indexer_select_post_process(
+                self,
+                q_li,
+                q_li_scale,
+                q_li_shape_ori,
+                weights,
+                kv_cache,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+                self.use_sparse_c8_indexer,
+                self.use_torch_npu_lightning_indexer,
+            )
+            if self.use_index_cache:
+                self._update_indexcache_topk_indices(topk_indices)
+
+            attn_output = self._execute_sparse_flash_attention_process(
+                ql_nope,
+                q_pe,
+                kv_cache,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+            )
+            return output_padded, attn_output
+
         if kv_cache is not None:
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event = torch.npu.Event()
