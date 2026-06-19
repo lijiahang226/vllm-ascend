@@ -1451,6 +1451,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         use_sparse_c8_indexer: bool,
         use_torch_npu_lightning_indexer: bool,
     ) -> torch.Tensor:
+        topk = sfa_impl.indexer.topk_tokens
         if use_sparse_c8_indexer:
             assert len(kv_cache) == 3
             assert q_li_shape_ori is not None
@@ -1459,21 +1460,61 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 q_li_scale = q_li_scale.view(q_li_shape_ori[:-1])
                 key_dequant_scale = kv_cache[2].squeeze(2)
 
-                topk_indices = torch_npu.npu_quant_lightning_indexer(
+                seqused_q = actual_seq_lengths_query.to(torch.int32)
+                seqused_k = actual_seq_lengths_key.to(torch.int32)
+                cu_seqlens_q = torch.cat(
+                    [
+                        torch.zeros(1, dtype=torch.int32, device=seqused_q.device),
+                        seqused_q.cumsum(0).to(torch.int32),
+                    ]
+                )
+                cu_seqlens_k = torch.cat(
+                    [
+                        torch.zeros(1, dtype=torch.int32, device=seqused_k.device),
+                        seqused_k.cumsum(0).to(torch.int32),
+                    ]
+                )
+
+                metadata = torch.ops._C_ascend.npu_lightning_indexer_v2_metadata(
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
+                    seqused_q=seqused_q,
+                    seqused_k=seqused_k,
+                    cmp_residual_k=None,
+                    num_heads_q=sfa_impl.n_head,
+                    num_heads_k=kv_cache[1].shape[-2] if kv_cache[1].dim() == 4 else 1,
+                    head_dim=sfa_impl.head_dim,
+                    topk=topk,
+                    batch_size=actual_seq_lengths_query.shape[0],
+                    max_seqlen_q=0,
+                    max_seqlen_k=0,
+                    layout_q="TND",
+                    layout_k="PA_BSND",
+                    mask_mode=3,
+                    cmp_ratio=1,
+                )
+
+                topk_indices, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
                     query=q_li.view(q_li_shape_ori),
                     key=kv_cache[1],
-                    weights=weights,
-                    query_dequant_scale=q_li_scale,
-                    key_dequant_scale=key_dequant_scale,
-                    actual_seq_lengths_query=actual_seq_lengths_query,
-                    actual_seq_lengths_key=actual_seq_lengths_key,
+                    weights=weights.float(),
+                    query_dequant_scale=q_li_scale.float(),
+                    key_dequant_scale=key_dequant_scale.float(),
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=None,
+                    seqused_q=seqused_q,
+                    seqused_k=seqused_k,
+                    cmp_residual_k=None,
                     block_table=attn_metadata.block_table,
-                    query_quant_mode=0,
-                    key_quant_mode=0,
-                    layout_query="TND",
-                    layout_key="PA_BSND",
-                    sparse_count=2048,
-                    sparse_mode=3,
+                    output_idx_offset=None,
+                    metadata=metadata,
+                    quant_mode=1,
+                    layout_q="TND",
+                    layout_k="PA_BSND",
+                    topk=topk,
+                    mask_mode=3,
+                    cmp_ratio=1,
+                    return_value=False,
                 )
             else:
                 topk_indices, _ = torch_npu.npu_lightning_indexer(
@@ -1485,7 +1526,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                     block_table=attn_metadata.block_table,
                     layout_query="TND",
                     layout_key="PA_BSND",
-                    sparse_count=2048,
+                    sparse_count=topk,
                     sparse_mode=3,
                 )
         else:
@@ -1498,7 +1539,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 block_table=attn_metadata.block_table,
                 layout_query="TND",
                 layout_key="PA_BSND",
-                sparse_count=2048,
+                sparse_count=topk,
                 sparse_mode=3,
             )
         return topk_indices

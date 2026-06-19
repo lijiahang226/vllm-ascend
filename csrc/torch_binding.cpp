@@ -1258,6 +1258,102 @@ at::Tensor npu_quant_lightning_indexer_metadata_npu(
     return output;
 }
 
+std::tuple<at::Tensor, at::Tensor> construct_quant_lightning_indexer_v2_output_tensor(
+    const at::Tensor &query, const at::Tensor &key, int64_t topk, std::string query_layout_str,
+    std::string key_layout_str, bool return_value)
+{
+    constexpr int64_t SIZE = 8;
+    constexpr int64_t DIM_0 = 0;
+    constexpr int64_t DIM_1 = 1;
+    constexpr int64_t DIM_2 = 2;
+    constexpr int64_t DIM_3 = 3;
+    at::SmallVector<int64_t, SIZE> output_size;
+    int64_t keyHeadNum = (key_layout_str == "TND") ? key.size(DIM_1) : key.size(DIM_2);
+    if (query_layout_str == "BSND") {
+        output_size = {query.size(DIM_0), query.size(DIM_1), keyHeadNum, topk};
+    } else {
+        output_size = {query.size(DIM_0), keyHeadNum, topk};
+    }
+    at::Tensor sparse_indices_out = at::empty(output_size, query.options().dtype(at::kInt));
+    at::Tensor sparse_values_out;
+    if (return_value) {
+        sparse_values_out = at::empty(output_size, query.options().dtype(at::kBFloat16));
+    } else {
+        sparse_values_out = at::empty({0}, query.options().dtype(at::kBFloat16));
+    }
+    return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
+}
+
+std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_v2_npu(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
+    const at::Tensor &query_dequant_scale, const at::Tensor &key_dequant_scale,
+    const c10::optional<at::Tensor> &cu_seqlens_q, const c10::optional<at::Tensor> &cu_seqlens_k,
+    const c10::optional<at::Tensor> &seqused_q, const c10::optional<at::Tensor> &seqused_k,
+    const c10::optional<at::Tensor> &cmp_residual_k, const c10::optional<at::Tensor> &block_table,
+    const c10::optional<at::Tensor> &output_idx_offset, const c10::optional<at::Tensor> &metadata,
+    int64_t quant_mode, int64_t max_seqlen_q, c10::string_view layout_q, c10::string_view layout_k,
+    int64_t topk, int64_t mask_mode, int64_t cmp_ratio, bool return_value)
+{
+    std::string query_layout_str = std::string(layout_q);
+    std::string key_layout_str = std::string(layout_k);
+
+    std::tuple<at::Tensor, at::Tensor> quant_lightning_indexer_v2_output =
+        construct_quant_lightning_indexer_v2_output_tensor(query, key, topk, query_layout_str,
+                                                           key_layout_str, return_value);
+    at::Tensor sparse_indices_out = std::get<0>(quant_lightning_indexer_v2_output);
+    at::Tensor sparse_values_out = std::get<1>(quant_lightning_indexer_v2_output);
+    char *query_layout_ptr = const_cast<char *>(query_layout_str.c_str());
+    char *key_layout_ptr = const_cast<char *>(key_layout_str.c_str());
+
+    EXEC_NPU_CMD(aclnnQuantLightningIndexerV2, query, key, weights, query_dequant_scale,
+                 key_dequant_scale, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, cmp_residual_k,
+                 block_table, output_idx_offset, metadata, topk, quant_mode, max_seqlen_q,
+                 query_layout_ptr, key_layout_ptr, mask_mode, cmp_ratio, return_value,
+                 sparse_indices_out, sparse_values_out);
+
+    return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
+}
+
+at::Tensor npu_lightning_indexer_v2_metadata_npu(
+    const c10::optional<at::Tensor> &cu_seqlens_q, const c10::optional<at::Tensor> &cu_seqlens_k,
+    const c10::optional<at::Tensor> &seqused_q, const c10::optional<at::Tensor> &seqused_k,
+    const c10::optional<at::Tensor> &cmp_residual_k, int64_t num_heads_q, int64_t num_heads_k,
+    int64_t head_dim, int64_t topk, int64_t batch_size, int64_t max_seqlen_q, int64_t max_seqlen_k,
+    c10::string_view layout_q, c10::string_view layout_k, int64_t mask_mode, int64_t cmp_ratio,
+    const c10::string_view device)
+{
+    constexpr int64_t OUTPUT_SIZE = 1024;
+    at::Device output_device = at::Device(std::string(device));
+    if (cu_seqlens_q.has_value()) {
+        output_device = cu_seqlens_q.value().device();
+    } else if (seqused_q.has_value()) {
+        output_device = seqused_q.value().device();
+    } else if (cu_seqlens_k.has_value()) {
+        output_device = cu_seqlens_k.value().device();
+    } else if (seqused_k.has_value()) {
+        output_device = seqused_k.value().device();
+    }
+
+    at::Tensor output = torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(output_device));
+    auto cu_seqlens_q_val = get_valid_tensor(cu_seqlens_q, output_device);
+    auto cu_seqlens_k_val = get_valid_tensor(cu_seqlens_k, output_device);
+    auto seqused_q_val = get_valid_tensor(seqused_q, output_device);
+    auto seqused_k_val = get_valid_tensor(seqused_k, output_device);
+    auto cmp_residual_k_val = get_valid_tensor(cmp_residual_k, output_device);
+
+    std::string layout_q_str = std::string(layout_q);
+    char *layout_q_ptr = const_cast<char *>(layout_q_str.c_str());
+    std::string layout_k_str = std::string(layout_k);
+    char *layout_k_ptr = const_cast<char *>(layout_k_str.c_str());
+
+    EXEC_NPU_CMD(aclnnLightningIndexerV2Metadata, cu_seqlens_q_val, cu_seqlens_k_val, seqused_q_val,
+                 seqused_k_val, cmp_residual_k_val, num_heads_q, num_heads_k, head_dim, topk,
+                 batch_size, max_seqlen_q, max_seqlen_k, layout_q_ptr, layout_k_ptr, mask_mode,
+                 cmp_ratio, output);
+
+    return output;
+}
+
 at::Tensor construct_hc_post_output_tensor(const at::Tensor& residual)
 {
     constexpr int64_t SIZE = 8;
@@ -2559,6 +2655,50 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> (Tensor metadata)"
         );
     ops.impl("npu_quant_lightning_indexer_metadata", torch::kPrivateUse1, &vllm_ascend::npu_quant_lightning_indexer_metadata_npu);
+
+    ops.def(
+        "npu_quant_lightning_indexer_v2("
+            "Tensor query, Tensor key, Tensor weights, "
+            "Tensor query_dequant_scale, Tensor key_dequant_scale, "
+            "Tensor? cu_seqlens_q=None, "
+            "Tensor? cu_seqlens_k=None, "
+            "Tensor? seqused_q=None, "
+            "Tensor? seqused_k=None, "
+            "Tensor? cmp_residual_k=None, "
+            "Tensor? block_table=None, "
+            "Tensor? output_idx_offset=None, "
+            "Tensor? metadata=None, "
+            "int quant_mode=1, "
+            "int max_seqlen_q=-1, "
+            "str layout_q=\"BSND\", str layout_k=\"BSND\", "
+            "int topk=2048, int mask_mode=0, "
+            "int cmp_ratio=1, bool return_value=False"
+        ") -> (Tensor sparse_indices, Tensor sparse_values)"
+        );
+    ops.impl("npu_quant_lightning_indexer_v2", torch::kPrivateUse1, &vllm_ascend::npu_quant_lightning_indexer_v2_npu);
+
+    ops.def(
+        "npu_lightning_indexer_v2_metadata("
+            "Tensor? cu_seqlens_q=None, "
+            "Tensor? cu_seqlens_k=None, "
+            "Tensor? seqused_q=None, "
+            "Tensor? seqused_k=None, "
+            "Tensor? cmp_residual_k=None, "
+            "int num_heads_q, "
+            "int num_heads_k, "
+            "int head_dim, "
+            "int topk, "
+            "int batch_size=0, "
+            "int max_seqlen_q=0, "
+            "int max_seqlen_k=0, "
+            "str layout_q=\"BSND\", "
+            "str layout_k=\"BSND\", "
+            "int mask_mode=0, "
+            "int cmp_ratio=1, "
+            "str device=\"npu\""
+        ") -> (Tensor metadata)"
+        );
+    ops.impl("npu_lightning_indexer_v2_metadata", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_v2_metadata_npu);
 
     ops.def(
           "npu_hc_post("
