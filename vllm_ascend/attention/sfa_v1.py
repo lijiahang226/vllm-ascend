@@ -1435,9 +1435,9 @@ def custom_kv_rmsnorm_rope(
     gamma,
     cos,
     sin,
-    index,
-    k_cache,
-    ckv_cache,
+    index=None,
+    k_cache=None,
+    ckv_cache=None,
     k_rope_scale=None,
     c_kv_scale=None,
     k_rope_offset=None,
@@ -1447,12 +1447,8 @@ def custom_kv_rmsnorm_rope(
     cache_mode="Norm",
     is_output_kv=False,
 ):
-    # Split KV into RMSNorm and RoPE parts for sparse C8 cache preparation.
-    rms_in, rope_in = kv.split([512, 64], dim=-1)
-    k_nope, _ = torch_npu.npu_rms_norm(rms_in, gamma, epsilon=epsilon)
-    k_rope = torch_npu.npu_interleave_rope(rope_in, cos, sin)
+    k_nope, k_rope = torch.ops.vllm.split_kv_rmsnorm_rope(kv, gamma, cos, sin, epsilon)
 
-    # Store k_nope with block FP8 scales for the sparse C8 cache layout.
     k_nope, knope_scale = torch_npu.npu_dynamic_block_quant(
         k_nope.view(-1, 1, k_nope.shape[-1]),
         dst_type=torch.float8_e4m3fn,
@@ -1460,7 +1456,7 @@ def custom_kv_rmsnorm_rope(
         col_block_size=128,
     )
     return (
-        k_rope.view(torch.float8_e4m3fn),
+        k_rope.to(torch.float8_e4m3fn),
         k_nope,
-        knope_scale.view(knope_scale.shape[0], -1).view(torch.float8_e4m3fn),
+        knope_scale.view(knope_scale.shape[0], -1).to(torch.float8_e4m3fn),
     )
