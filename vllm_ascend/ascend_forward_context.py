@@ -208,9 +208,13 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     else:
         # NOTE: To save memory, we cap the max number of tokens to 512.
         max_num_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
+
+    max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+
     tp_size = vllm_config.parallel_config.tensor_parallel_size
     # Use integer arithmetic for ceiling division.
     num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
+    num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, 256)
     _mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
 
 
