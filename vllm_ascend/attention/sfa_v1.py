@@ -35,6 +35,10 @@ from vllm_ascend.attention.utils import (
     transdata,
     wait_for_kv_layer_from_connector,
 )
+from vllm_ascend.compilation.acl_graph import (
+    get_draft_graph_params,
+    get_graph_params,
+)
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
 from vllm_ascend.distributed.utils import all_gather_async
@@ -62,6 +66,7 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     get_weight_prefetch_method,
     maybe_trans_nz,
+    weak_ref_tensors,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -244,9 +249,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
-        # Explicit override in case the underlying builder specialized this getter.
-        # @override omitted only because of mypy limitation due to type variable.
-        return AttentionCGSupport.UNIFORM_BATCH
+        return AttentionCGSupport.ALWAYS
 
     def reorder_batch(self, input_batch: "NPUInputBatch", scheduler_output: "SchedulerOutput") -> bool:
         # No need to reorder for Ascend SFA
@@ -559,6 +562,44 @@ class AscendSFAImpl(MLAAttentionImpl):
                 register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
 
     @staticmethod
+    def _sparse_flash_attention_kernel(
+        ql_nope, q_pe, kv, key_rope, topk_indices, block_table,
+        seq_lens_q, seq_lens_kv, scale_value,
+    ):
+        if kv.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
+            query = torch.cat([ql_nope, q_pe], dim=-1)
+            return torch_npu.npu_kv_quant_sparse_flash_attention(
+                query=query,
+                key=kv, value=kv,
+                sparse_indices=topk_indices,
+                scale_value=scale_value,
+                sparse_block_size=1,
+                block_table=block_table,
+                actual_seq_lengths_query=seq_lens_q,
+                actual_seq_lengths_kv=seq_lens_kv,
+                layout_query="TND", layout_kv="PA_BSND",
+                sparse_mode=3, attention_mode=2,
+                quant_scale_repo_mode=1, tile_size=128,
+                key_quant_mode=2, value_quant_mode=2,
+                rope_head_dim=64,
+            )
+        else:
+            attn_output, _, _ = torch_npu.npu_sparse_flash_attention(
+                query=ql_nope,
+                key=kv, value=kv,
+                sparse_indices=topk_indices,
+                scale_value=scale_value,
+                sparse_block_size=1,
+                block_table=block_table,
+                actual_seq_lengths_query=seq_lens_q,
+                actual_seq_lengths_kv=seq_lens_kv,
+                query_rope=q_pe, key_rope=key_rope,
+                layout_query="TND", layout_kv="PA_BSND",
+                sparse_mode=3, attention_mode=2,
+            )
+            return attn_output
+
+    @staticmethod
     def update_graph_params(
         update_stream,
         forward_context,
@@ -568,8 +609,28 @@ class AscendSFAImpl(MLAAttentionImpl):
         num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
     ):
-        # sfa does not need to update graph params
-        pass
+        if _EXTRA_CTX.is_draft_model:
+            graph_params = get_draft_graph_params()
+        else:
+            graph_params = get_graph_params()
+
+        attn_params_list = graph_params.attn_params.get(num_tokens, [])
+        handle_list = graph_params.handles.get(num_tokens, [])
+        event_list = graph_params.events.get(num_tokens, [])
+
+        if not attn_params_list:
+            return
+
+        with torch.npu.stream(update_stream):
+            for param, handle, event in zip(attn_params_list, handle_list, event_list):
+                ql_nope, q_pe, kv_nope, kv_rope, topk_indices, block_table, seq_lens_q, seq_lens_kv, scale_value = param
+                torch.npu.graph_task_update_begin(update_stream, handle)
+                AscendSFAImpl._sparse_flash_attention_kernel(
+                    ql_nope, q_pe, kv_nope, kv_rope, topk_indices, block_table,
+                    seq_lens_q, seq_lens_kv, scale_value,
+                )
+                torch.npu.graph_task_update_end(update_stream)
+                event.record(update_stream)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # NOTE: We currently do not support quant kv_b_proj.
@@ -1204,6 +1265,54 @@ class AscendSFAImpl(MLAAttentionImpl):
             topk_indices_to_cache = topk_indices_to_cache.squeeze(1)
         topk_indices_buffer.copy_(topk_indices_to_cache)
 
+    def full_graph_sparse_flash_attention(
+        self,
+        ql_nope,
+        q_pe,
+        kv_cache,
+        topk_indices,
+        attn_metadata,
+        actual_seq_lengths_query,
+        actual_seq_lengths_key,
+    ):
+        graph_params = get_graph_params()
+        num_tokens = ql_nope.shape[0]
+        block_table = attn_metadata.block_table
+        kv = kv_cache[0]
+        key_rope = kv_cache[1]
+
+        if _EXTRA_CTX.capturing:
+            stream = torch.npu.npu.current_stream()
+            event = torch.npu.ExternalEvent()
+            event.record(stream)
+            graph_params.events[num_tokens].append(event)
+            graph_params.attn_params[num_tokens].append(
+                (
+                    weak_ref_tensors(ql_nope),
+                    weak_ref_tensors(q_pe),
+                    weak_ref_tensors(kv),
+                    weak_ref_tensors(key_rope),
+                    weak_ref_tensors(topk_indices),
+                    weak_ref_tensors(block_table),
+                    actual_seq_lengths_query,
+                    actual_seq_lengths_key,
+                    self.scale,
+                )
+            )
+
+            torch.npu.graph_task_group_begin(stream)
+            attn_output = AscendSFAImpl._sparse_flash_attention_kernel(
+                ql_nope, q_pe, kv, key_rope, topk_indices, block_table,
+                actual_seq_lengths_query, actual_seq_lengths_key, self.scale,
+            )
+            handle = torch.npu.graph_task_group_end(stream)
+            graph_params.handles[num_tokens].append(handle)
+            return attn_output
+        else:
+            return self._execute_sparse_flash_attention_process(
+                ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
+            )
+
     def _execute_sparse_flash_attention_process(
         self, ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
     ):
@@ -1502,7 +1611,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.use_index_cache:
                 self._update_indexcache_topk_indices(topk_indices)
 
-        attn_output = self._execute_sparse_flash_attention_process(
+        attn_output = self.full_graph_sparse_flash_attention(
             ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
         )
 
