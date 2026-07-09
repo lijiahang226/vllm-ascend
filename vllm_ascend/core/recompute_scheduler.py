@@ -107,6 +107,10 @@ class RecomputeScheduler(Scheduler):
         )
         self.is_kv_producer = self.vllm_config.kv_transfer_config and self.vllm_config.kv_transfer_config.is_kv_producer
 
+        # Count of requests that triggered recomputation
+        # (offloaded=False path in schedule()).
+        self.num_recomputed_reqs: int = 0
+
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
         if existing is not None:
@@ -329,6 +333,7 @@ class RecomputeScheduler(Scheduler):
                             self._preempt_request(recomputed_req, scheduled_timestamp)
                             preempted_reqs.append(recomputed_req)
                         else:
+                            self.num_recomputed_reqs += 1
                             self.kv_cache_manager.free(recomputed_req)
                             logger.info(
                                 "Recompute preemption falls back without offload for request %s, computed_tokens=%d.",
