@@ -1720,32 +1720,62 @@ class AscendSFAImpl(MLAAttentionImpl):
                         fused_kv_parts.append(k_li.view(-1, k_li.shape[-1]))
 
                 fused_kv_input = torch.cat(fused_kv_parts, dim=1)
-                fused_kv_no_split, kv_ag_handle = all_gather_async(
-                    fused_kv_input,
-                    get_tp_group(),
-                    async_op=async_op,
-                )
-                if kv_ag_handle is not None:
-                    kv_ag_handles.append(kv_ag_handle)
+
+                # Merge consecutive TP all_gather calls into a single fused
+                # all_gather to avoid back-to-back async communication dispatch.
+                # On Ascend, separate gathers can leave SFA with an incomplete
+                # stream dependency on the first prefill (same pattern as the
+                # DCP query-gather fusion in context_parallel/sfa_cp.py:1208).
+                ag_parts = []
+                split_sizes_bytes = []
+                # Track extra tensors' original dtypes and last-dim sizes for
+                # restoration after the fused gather+split.
+                restore_specs: list[tuple[torch.dtype, int]] = []
+
+                fkv_2d = fused_kv_input.reshape(fused_kv_input.shape[0], -1)
+                fkv_int8 = fkv_2d.view(torch.int8)
+                ag_parts.append(fkv_int8)
+                split_sizes_bytes.append(fkv_int8.shape[-1])
 
                 if self.has_indexer and (self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8):
                     assert k_li is not None
-                    k_li, kv_ag_handle = all_gather_async(
-                        k_li,
-                        get_tp_group(),
-                        async_op=async_op,
-                    )
-                    if kv_ag_handle is not None:
-                        kv_ag_handles.append(kv_ag_handle)
+                    k_li_2d = k_li.detach().reshape(k_li.shape[0], -1)
+                    k_li_int8 = k_li_2d.view(torch.int8)
+                    ag_parts.append(k_li_int8)
+                    split_sizes_bytes.append(k_li_int8.shape[-1])
+                    restore_specs.append((k_li.dtype, k_li.shape[-1]))
+
                 if self.has_indexer and self.enable_sparse_li_c8:
                     assert k_li_scale is not None
-                    k_li_scale, kv_ag_handle = all_gather_async(
-                        k_li_scale,
-                        get_tp_group(),
-                        async_op=async_op,
-                    )
-                    if kv_ag_handle is not None:
-                        kv_ag_handles.append(kv_ag_handle)
+                    k_li_scale_2d = k_li_scale.detach().reshape(k_li_scale.shape[0], -1)
+                    k_li_scale_int8 = k_li_scale_2d.view(torch.int8)
+                    ag_parts.append(k_li_scale_int8)
+                    split_sizes_bytes.append(k_li_scale_int8.shape[-1])
+                    restore_specs.append((k_li_scale.dtype, k_li_scale.shape[-1]))
+
+                fused_for_ag = torch.cat(ag_parts, dim=1)
+                gathered, kv_ag_handle = all_gather_async(
+                    fused_for_ag,
+                    get_tp_group(),
+                    async_op=async_op,
+                )
+                kv_ag_handles = [kv_ag_handle] if kv_ag_handle is not None else []
+
+                # Split gathered result and restore original dtypes / last-dim shapes
+                gathered_parts = list(torch.split(gathered, split_sizes_bytes, dim=1))
+                fkv_int8_out = gathered_parts.pop(0)
+                fused_kv_no_split = fkv_int8_out.view(fused_kv_input.dtype).reshape(
+                    fkv_int8_out.shape[0], -1
+                )
+
+                if self.has_indexer and (self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8):
+                    orig_dtype, orig_last_dim = restore_specs.pop(0)
+                    k_li_int8_out = gathered_parts.pop(0)
+                    k_li = k_li_int8_out.view(orig_dtype).reshape(-1, orig_last_dim)
+                if self.has_indexer and self.enable_sparse_li_c8:
+                    orig_dtype, orig_last_dim = restore_specs.pop(0)
+                    k_li_scale_int8_out = gathered_parts.pop(0)
+                    k_li_scale = k_li_scale_int8_out.view(orig_dtype).reshape(-1, orig_last_dim)
 
             ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
             q_pe = self.rope_single(q_pe, cos, sin)
