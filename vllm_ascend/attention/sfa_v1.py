@@ -758,7 +758,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         self._quant_type = type(quant_method) if quant_method is not None else None
         qt = self._quant_type
 
-        if self.is_kv_consumer and (
+        is_pd_producer = self.is_kv_producer and not self.is_kv_consumer
+        if not is_pd_producer and (
             (qt is AscendW8A8DynamicLinearMethod and self.enable_sparse_sfa_c8)
             or qt is AscendW8A8MXFP8DynamicLinearMethod
             or qt is None
@@ -794,7 +795,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             reasons.append("fused_qkv_a_proj is None, mlapo is disabled.")
 
         if pp_type is PreprocessType.PROLOG_V3:
-            if self.is_kv_producer:
+            if self.is_kv_producer and not self.is_kv_consumer:
                 reasons.append("PROLOG_V3 is disabled on KV producer workers.")
             if self._quant_type is None and self.enable_sparse_sfa_c8:
                 reasons.append("PROLOG_V3: C8 sparse requires quantized MLAPO.")
@@ -813,9 +814,10 @@ class AscendSFAImpl(MLAAttentionImpl):
         qt = self._quant_type
 
         if qt is None:
-            self.fused_qkv_a_proj.weight.data = self.fused_qkv_a_proj.weight.data.T
-
-        fused_weight = self.fused_qkv_a_proj.weight.data
+            # Local transpose only; co-located prefill still needs the original weight.
+            fused_weight = self.fused_qkv_a_proj.weight.data.T
+        else:
+            fused_weight = self.fused_qkv_a_proj.weight.data
         weight_dq = fused_weight[..., : self.q_lora_rank].contiguous()
         weight_dkv_kr = fused_weight[..., self.q_lora_rank :].contiguous()
         if qt is not None:
@@ -849,7 +851,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             uq_scale = self.q_proj.weight_scale.data.transpose(0, 1)
             self.weight_uq_qr_scale = uq_scale.reshape(-1, uq_scale.shape[1] * uq_scale.shape[2])
 
-        if self.is_kv_consumer:
+        if self.is_kv_consumer and not self.is_kv_producer:
             dispose_layer(self.fused_qkv_a_proj)
             dispose_layer(self.q_proj)
             torch.npu.empty_cache()

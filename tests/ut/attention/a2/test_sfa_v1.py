@@ -946,6 +946,61 @@ class TestAscendSFAImpl(TestBase):
     def test_process_weights_for_fused_prolog_v3_unquantized(self):
         self._run_prolog_v3_weight_test(None, False)
 
+    def _make_prolog_v3_weight_state(self, qt):
+        """Mocked fused_qkv_a_proj/q_proj + format-cast for weight processing."""
+        mock_format_cast = patch("torch_npu.npu_format_cast", return_value=torch.randn(128, 128))
+        mock_format_cast.start()
+        self.addCleanup(mock_format_cast.stop)
+
+        self.impl._quant_type = qt
+        self.impl.fused_qkv_a_proj = MagicMock()
+        self.impl.fused_qkv_a_proj.weight.data = torch.randn(128, 96, 64)
+        if qt is None:
+            self.impl.q_proj = SimpleNamespace(weight=SimpleNamespace(data=torch.randn(128, 96)))
+        else:
+            self.impl.fused_qkv_a_proj.weight_scale = torch.randn(64, 128, 128)
+            self.impl.q_proj = MagicMock()
+            self.impl.q_proj.weight.data = torch.randn(128, 128)
+            self.impl.q_proj.weight_scale.data = torch.randn(128, 128, 128)
+        self.impl.q_lora_rank = 32
+
+    @patch("torch.npu.empty_cache")
+    @patch("vllm_ascend.attention.sfa_v1.dispose_layer")
+    def test_process_weights_for_fused_prolog_v3_dispose_by_role(self, mock_dispose, mock_empty_cache):
+        """Only decode-only consumers drop the original layers."""
+        for is_kv_consumer, is_kv_producer, dispose_count in (
+            (True, False, 2),  # PD-disaggregated decode (D) node
+            (True, True, 0),  # co-located kv_both worker (vLLM role flags)
+            (False, False, 0),  # co-located worker (no kv_transfer_config)
+        ):
+            with self.subTest(is_kv_consumer=is_kv_consumer, is_kv_producer=is_kv_producer):
+                mock_dispose.reset_mock()
+                self._make_prolog_v3_weight_state(AscendW8A8MXFP8DynamicLinearMethod)
+                self.impl.is_kv_consumer = is_kv_consumer
+                self.impl.is_kv_producer = is_kv_producer
+
+                self.impl._process_weights_for_fused_prolog_v3()
+
+                self.assertEqual(mock_dispose.call_count, dispose_count)
+                self.assertTrue(hasattr(self.impl, "weight_dq"))
+        mock_empty_cache.assert_called_once()
+
+    def test_process_weights_for_fused_prolog_v3_unquantized_keeps_original_weight(self):
+        """Unquantized processing must not transpose the layer weight in place.
+
+        Co-located (non-PD) workers still run the native prefill path on the
+        same engine and need the original (out, in) weight.
+        """
+        self._make_prolog_v3_weight_state(None)
+        original_weight = self.impl.fused_qkv_a_proj.weight.data
+        self.impl.is_kv_consumer = False
+        self.impl.is_kv_producer = False
+
+        self.impl._process_weights_for_fused_prolog_v3()
+
+        self.assertIs(self.impl.fused_qkv_a_proj.weight.data, original_weight)
+        self.assertTrue(hasattr(self.impl, "weight_dq"))
+
     # ============ exec_kv: sparse C8 uses custom_kv_rmsnorm_rope ============
 
     @patch("vllm_ascend.attention.sfa_v1.custom_kv_rmsnorm_rope")
@@ -1035,33 +1090,41 @@ class TestAscendSFAImpl(TestBase):
         path = self.impl._resolve_preprocess_type(torch.bfloat16)
         self.assertEqual(path, PreprocessType.PROLOG_V3)
 
-    def test_resolve_path_unquantized_c8_goes_prolog_v3(self):
-        """Unquantized + is_kv_consumer + C8 → PROLOG_V3 (blocked by reasons)."""
-        self._set_quant(None)
-        self.impl.is_kv_consumer = True
-        self.impl.enable_sparse_sfa_c8 = True
-
-        path = self.impl._resolve_preprocess_type(torch.bfloat16)
-        # Enters candidate but blocked by _get_fused_type_unsupported_reasons
-        # (unquantized + C8).  With _try_enable_type mocked to True, still
-        # returns PROLOG_V3 in the test.
-        self.assertEqual(path, PreprocessType.PROLOG_V3)
-
-    def test_resolve_path_no_mlapo_goes_native(self):
-        """No quant + MLAPO disabled → NATIVE."""
-        self._set_quant(None)
+    def test_resolve_path_w8a8_mlapo_disabled_goes_native(self):
+        """W8A8 + MLAPO disabled (and no PROLOG_V3 candidate) → NATIVE."""
+        self._set_quant(AscendW8A8LinearMethod)
 
         path = self.impl._resolve_preprocess_type(torch.bfloat16)
         self.assertEqual(path, PreprocessType.NATIVE)
 
-    def test_resolve_path_w8a8dynamic_c8_no_mlapo_still_prolog_v3(self):
-        """W8A8Dynamic+C8 enters PROLOG_V3 even when enable_mlapo=False."""
+    def test_resolve_path_co_located_goes_prolog_v3(self):
+        """Unquantized co-located (non-PD) worker: no role flags → PROLOG_V3."""
+        self._set_quant(None)
+        self.impl.is_kv_producer = False
+        self.impl.is_kv_consumer = False
+
+        path = self.impl._resolve_preprocess_type(torch.bfloat16)
+        self.assertEqual(path, PreprocessType.PROLOG_V3)
+
+    def test_resolve_path_kv_both_goes_prolog_v3(self):
+        """Co-located kv_both worker (vLLM reports both role flags True)."""
         self._set_quant(AscendW8A8DynamicLinearMethod)
+        self.impl.is_kv_producer = True
         self.impl.is_kv_consumer = True
         self.impl.enable_sparse_sfa_c8 = True
 
         path = self.impl._resolve_preprocess_type(torch.bfloat16)
         self.assertEqual(path, PreprocessType.PROLOG_V3)
+
+    def test_resolve_path_producer_stays_native(self):
+        """PD-disaggregated P node (is_kv_producer) keeps PROLOG_V3 disabled."""
+        self._set_quant(AscendW8A8DynamicLinearMethod)
+        self.impl.is_kv_producer = True
+        self.impl.is_kv_consumer = False
+        self.impl.enable_sparse_sfa_c8 = True
+
+        path = self.impl._resolve_preprocess_type(torch.bfloat16)
+        self.assertEqual(path, PreprocessType.NATIVE)
 
     # ============ _get_fused_type_unsupported_reasons ============
 
@@ -1084,11 +1147,22 @@ class TestAscendSFAImpl(TestBase):
         self.assertTrue(any("DSA-CP" in r for r in reasons))
 
     def test_reasons_kv_producer_blocked(self):
+        """PD-disaggregated P node (is_kv_producer) blocks PROLOG_V3."""
         self._setup_prolog_v3_state()
         self.impl.is_kv_producer = True
+        self.impl.is_kv_consumer = False
 
         reasons = self.impl._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3)
         self.assertTrue(any("KV producer" in r for r in reasons))
+
+    def test_reasons_kv_both_not_blocked(self):
+        """Co-located kv_both worker (both role flags True) is not blocked."""
+        self._setup_prolog_v3_state()
+        self.impl.is_kv_producer = True
+        self.impl.is_kv_consumer = True
+
+        reasons = self.impl._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3)
+        self.assertFalse(any("KV producer" in r for r in reasons))
 
     def test_reasons_unquantized_c8_blocked(self):
         self._setup_prolog_v3_state()
