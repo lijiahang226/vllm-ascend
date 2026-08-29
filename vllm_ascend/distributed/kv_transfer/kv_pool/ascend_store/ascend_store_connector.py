@@ -90,6 +90,11 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         backend_name = vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake")
         self.backend_name = backend_name.lower()
         self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
+        self.use_scheduler_client_for_lookup = (
+            not self.use_layerwise
+            and self.backend_name == "memcache"
+            and vllm_config.kv_transfer_config.kv_connector_extra_config.get("use_scheduler_client_for_lookup", False)
+        )
         self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "consumer_is_to_put", False
         )
@@ -119,7 +124,11 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 kv_cache_config,
             )
             assert self.connector_worker is not None
-            if not self.use_layerwise and vllm_config.parallel_config.rank == 0:
+            if (
+                not self.use_layerwise
+                and not self.use_scheduler_client_for_lookup
+                and vllm_config.parallel_config.rank == 0
+            ):
                 self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config)
 
     ############################################################
@@ -133,9 +142,14 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         """Ignore P/D handshake metadata because AscendStore handles PP via pool keys."""
         pass
 
-    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
+    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int | None, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(request, num_computed_tokens)
+
+    def shutdown(self) -> None:
+        connector_scheduler = getattr(self, "connector_scheduler", None)
+        if connector_scheduler is not None:
+            connector_scheduler.shutdown()
 
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         assert self.connector_scheduler is not None
