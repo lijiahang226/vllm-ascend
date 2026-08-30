@@ -1740,14 +1740,24 @@ class AscendSFAImpl(MLAAttentionImpl):
                 if not self.enable_sparse_sfa_c8:
                     assert k_pe is not None
                     assert k_nope is not None
-                    k_nope = k_nope.view(k_nope.shape[0], 1, -1)
-                    k_pe = k_pe.view(k_pe.shape[0], 1, -1)
-                    DeviceOperator.reshape_and_cache(
-                        key=k_nope[: attn_metadata.num_actual_tokens],
-                        value=k_pe[: attn_metadata.num_actual_tokens],
-                        key_cache=kv_cache[0],
-                        value_cache=kv_cache[1],
-                        slot_mapping=slot_mapping_sfa[: attn_metadata.num_actual_tokens],
+                    # C16 caches stay split, so the gathered full-sequence KV is
+                    # written back through the same npu_scatter_nd_update_ path as
+                    # the C8 packed branch above. The previous reshape_and_cache
+                    # approach rebuilt strided views (split -> [S, 1, D] ->
+                    # contiguous) and routed them through npu_scatter_pa_kv_cache,
+                    # making this the first sync point to surface device errors
+                    # after an HCCL collective failure (e.g. the alltoall
+                    # timeout seen with SFA DSA-CP C16).
+                    slot_mapping_slice = slot_mapping_sfa[: attn_metadata.num_actual_tokens].view(-1, 1)
+                    torch_npu.npu_scatter_nd_update_(
+                        kv_cache[0].view(-1, self.kv_lora_rank),
+                        slot_mapping_slice,
+                        k_nope[: attn_metadata.num_actual_tokens].contiguous(),
+                    )
+                    torch_npu.npu_scatter_nd_update_(
+                        kv_cache[1].view(-1, self.qk_rope_head_dim),
+                        slot_mapping_slice,
+                        k_pe[: attn_metadata.num_actual_tokens].contiguous(),
                     )
 
         return k_pe, k_nope, k_li, o_proj_full_handle, o_proj_full_param_handles

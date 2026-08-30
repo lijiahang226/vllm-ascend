@@ -1040,6 +1040,79 @@ class TestAscendSFAImpl(TestBase):
         self.assertIs(result, fake_result)
         mock_npu_kv_rmsnorm_rope_cache.assert_not_called()
 
+    # ============ _maybe_store_kvcache_for_c8_n_dsacp: C16 DSA-CP write-back ============
+
+    @patch("torch_npu.npu_scatter_nd_update_", create=True)
+    @patch("vllm_ascend.attention.sfa_v1.DeviceOperator.reshape_and_cache")
+    def test_dsa_cp_c16_store_scatters_split_caches(
+        self,
+        mock_reshape_and_cache,
+        mock_scatter_nd,
+    ):
+        """DSA-CP non-C8 write-back scatters nope/rope into the split caches.
+
+        Regression: the previous reshape_and_cache path rebuilt strided views
+        (split -> [S, 1, D]) and routed them through
+        npu_scatter_pa_kv_cache, making this the first sync point to surface
+        device errors after an HCCL collective failure (alltoall timeout on
+        SFA DSA-CP C16). The C16 path now mirrors the C8 packed-store branch
+        with two npu_scatter_nd_update_ calls.
+        """
+        self.impl.enable_dsa_cp = True
+        self.impl.enable_sparse_sfa_c8 = False
+        self.impl.enable_sparse_li_c8 = False
+        self.impl.has_indexer = True
+        self.impl.head_dim = 128
+        self.impl.kv_lora_rank = 512
+        self.impl.qk_rope_head_dim = 64
+
+        num_tokens = 16
+        num_actual_tokens = 12
+        k_pe = torch.randn(num_tokens, self.impl.qk_rope_head_dim)
+        k_nope = torch.randn(num_tokens, self.impl.kv_lora_rank)
+        k_li = torch.randn(num_tokens, self.impl.head_dim)
+        fused_kv_no_split = torch.cat([k_pe, k_nope, k_li], dim=-1)
+        kv_cache = (
+            torch.randn(4, 128, 1, self.impl.kv_lora_rank),
+            torch.randn(4, 128, 1, self.impl.qk_rope_head_dim),
+            torch.randn(4, 128, 1, self.impl.head_dim),
+        )
+        slot_mapping = torch.arange(num_tokens, dtype=torch.int64)
+        attn_metadata = SimpleNamespace(num_actual_tokens=num_actual_tokens)
+
+        k_pe_out, k_nope_out, k_li_out, _, _ = self.impl._maybe_store_kvcache_for_c8_n_dsacp(
+            k_pe=k_pe,
+            k_nope=k_nope,
+            knope_scale=None,
+            k_li=k_li,
+            fused_kv_no_split=fused_kv_no_split,
+            kv_ag_handles=[],
+            kv_cache=kv_cache,
+            slot_mapping_sfa=slot_mapping,
+            attn_metadata=attn_metadata,
+            full_gather_o_proj_enabled=False,
+        )
+
+        mock_reshape_and_cache.assert_not_called()
+        self.assertEqual(mock_scatter_nd.call_count, 2)
+
+        # nope cache: data=[num_blocks*block_size, kv_lora_rank], updates sliced.
+        first_args = mock_scatter_nd.call_args_list[0].args
+        self.assertEqual(first_args[0].shape, (4 * 128, self.impl.kv_lora_rank))
+        self.assertIs(first_args[0].data_ptr(), kv_cache[0].data_ptr())
+        self.assertEqual(first_args[1].shape, (num_actual_tokens, 1))
+        self.assertTrue(torch.equal(first_args[2], k_nope[:num_actual_tokens].contiguous()))
+        # rope cache: data=[num_blocks*block_size, qk_rope_head_dim].
+        second_args = mock_scatter_nd.call_args_list[1].args
+        self.assertEqual(second_args[0].shape, (4 * 128, self.impl.qk_rope_head_dim))
+        self.assertIs(second_args[0].data_ptr(), kv_cache[1].data_ptr())
+        self.assertEqual(second_args[1].shape, (num_actual_tokens, 1))
+        self.assertTrue(torch.equal(second_args[2], k_pe[:num_actual_tokens].contiguous()))
+        # The gathered indexer KV is returned for the later indexer scatter.
+        self.assertTrue(torch.equal(k_li_out, k_li))
+        self.assertTrue(torch.equal(k_pe_out, k_pe))
+        self.assertTrue(torch.equal(k_nope_out, k_nope))
+
     # ============ _resolve_preprocess_type: routing logic ============
 
     def _set_quant(self, qt):
