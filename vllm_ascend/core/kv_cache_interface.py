@@ -30,6 +30,32 @@ def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
     return getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
 
 
+def format_indexer_kpool_slot_mapping(
+    slot_mapping: torch.Tensor,
+    positions: torch.Tensor,
+    logical_block_size: int,
+    compress_ratio: int,
+) -> torch.Tensor:
+    """Map token slots to completed GLM-5 kpool slots.
+
+    Tokens before the end of a pool map to ``-1`` because they only update the
+    full-resolution state cache. The final token maps to the corresponding
+    entry in the compressed indexer cache.
+    """
+    if logical_block_size % compress_ratio:
+        raise ValueError(
+            f"logical_block_size={logical_block_size} must be divisible by compress_ratio={compress_ratio}."
+        )
+    valid = (slot_mapping >= 0) & (torch.remainder(positions + 1, compress_ratio) == 0)
+    safe_slots = slot_mapping.clamp_min(0)
+    block_ids = torch.div(safe_slots, logical_block_size, rounding_mode="floor")
+    offsets = torch.remainder(safe_slots, logical_block_size)
+    compressed_slots = block_ids * (logical_block_size // compress_ratio) + torch.div(
+        offsets, compress_ratio, rounding_mode="floor"
+    )
+    return torch.where(valid, compressed_slots, torch.full_like(compressed_slots, -1))
+
+
 @dataclass(frozen=True, kw_only=True)
 class AscendMLAAttentionSpec(MLAAttentionSpec):
     """MLA cache spec with Ascend-specific layout metadata.

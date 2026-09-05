@@ -383,6 +383,91 @@ class BaseDeviceAdaptor:
             )
         return topk_indices
 
+    @staticmethod
+    def kpool_key_pool_compress(
+        hidden_states: torch.Tensor,
+        wk: torch.Tensor,
+        gate_weight: torch.Tensor,
+        ape: torch.Tensor,
+        state_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        start_pos: torch.Tensor,
+        *,
+        norm_weight: torch.Tensor | None = None,
+        norm_bias: torch.Tensor | None = None,
+        norm_eps: float = 1e-6,
+        cu_seqlens: torch.Tensor | None = None,
+        cmp_ratio: int = 4,
+    ) -> torch.Tensor:
+        """Run the CANN ``key_pool`` operator for GLM-5 kpool indexers.
+
+        ``block_table`` must already follow the key_pool convention (vLLM
+        block id ``b >= 0`` mapped to ``b + 1``, ``-1`` mapped to ``0``);
+        the state cache is mutated in place and must be FP32 with an
+        all-zero dummy physical block 0. RoPE is not supported by the
+        operator: the framework must gate ``qk_rope_head_dim > 0`` before
+        reaching this path.
+        """
+        if state_cache.dtype != torch.float32:
+            raise TypeError(f"GLM-5 compressor state cache must be float32, got {state_cache.dtype}.")
+        return torch.ops._C_ascend.key_pool(
+            hidden_states,
+            wk,
+            gate_weight,
+            ape,
+            state_cache,
+            block_table,
+            start_pos,
+            norm_weight=norm_weight,
+            norm_bias=norm_bias,
+            cos=None,  # KeyPool RoPE unsupported
+            sin=None,  # KeyPool RoPE unsupported
+            cu_seqlens=cu_seqlens,
+            seqused=None,
+            cmp_ratio=cmp_ratio,
+            norm_eps=norm_eps,
+            rotary_mode=1,
+        )
+
+    @staticmethod
+    def kpool_pool_key_indexer(
+        query: torch.Tensor,
+        pool_key: torch.Tensor,
+        weights: torch.Tensor,
+        pool_tail_k: torch.Tensor,
+        *,
+        actual_seq_q: torch.Tensor,
+        actual_seq_k: torch.Tensor,
+        block_table: torch.Tensor,
+        topk: int,
+        pool_size: int,
+        mask_mode: int = 3,
+    ) -> torch.Tensor:
+        """Run the CANN ``pool_key_indexer`` operator for GLM-5 kpool indexers.
+
+        The operator applies ``1 / sqrt(head_dim)`` and the per-head ReLU
+        internally, so ``weights`` must only carry the model-level
+        ``n_head**-0.5`` factor. Returns ``[T, topk + pool_size - 1]``
+        int32 sparse indices (pool expansion + request-final tail append).
+        """
+        indices, _ = torch.ops._C_ascend.pool_key_indexer(
+            query,
+            pool_key,
+            weights,
+            pool_tail_k,
+            actual_seq_q=actual_seq_q,
+            actual_seq_k=actual_seq_k,
+            block_table=block_table,
+            layout_q="TND",
+            layout_k="PA_BBND",
+            topk=topk,
+            pool_size=pool_size,
+            mask_mode=mask_mode,
+            quant_mode=-1,
+            return_value=False,
+        )
+        return indices
+
     @classmethod
     def execute_sparse_flash_attention_process(
         cls,
