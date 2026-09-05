@@ -56,6 +56,9 @@ class HardwareCapability(Enum):
     SWIGLU_OAI_MX_QUANT = auto()
     TRITON_BATCH_MEMCPY = auto()
     UNRESTRICTED_MLAPO = auto()
+    # The vendored CANN ``key_pool`` / ``pool_key_indexer`` AscendC operators
+    # (arch22/arch35 only: Ascend 910B / 910_93 / 950). 310P has no kernel.
+    CANN_KPOOL_OPS = auto()
 
 
 class AttentionBackendFamily(Enum):
@@ -166,7 +169,8 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
-            capabilities=_STANDARD_CAPABILITIES | {HardwareCapability.NPU_TOP_K_TOP_P},
+            capabilities=_STANDARD_CAPABILITIES
+            | {HardwareCapability.NPU_TOP_K_TOP_P, HardwareCapability.CANN_KPOOL_OPS},
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
@@ -181,6 +185,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             capabilities=_A3_CAPABILITIES
             | {
                 HardwareCapability.CANN_MEGAMOE,
+                HardwareCapability.CANN_KPOOL_OPS,
                 HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                 HardwareCapability.NPU_TOP_K_TOP_P,
             },
@@ -222,6 +227,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                 {
                     HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
                     HardwareCapability.BGMV_SGMV_META_REGISTRATION,
+                    HardwareCapability.CANN_KPOOL_OPS,
                     HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
                     HardwareCapability.CLUSTER_CPU_TOPOLOGY,
                     HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,

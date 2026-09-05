@@ -127,6 +127,23 @@ def model_uses_kpool_indexer(model_config: Any | None) -> bool:
     return any(hasattr(getattr(model_config, attr, None), "index_kpool") for attr in ("hf_text_config", "hf_config"))
 
 
+def glm5_next_uses_cann_kpool(model_config: Any | None) -> bool:
+    """Return True when a GLM-5.3-Flash style kpool model runs the CANN path.
+
+    Combines the kpool model detection with the CANN hardware gate. Both the
+    indexer op and the MLA sparse attention branch use this single decision
+    so the two stays in sync.
+    """
+    if not model_uses_kpool_indexer(model_config):
+        return False
+    from vllm_ascend.device.hardware_profile import (
+        HardwareCapability,
+        get_current_hardware_profile,
+    )
+
+    return get_current_hardware_profile().supports(HardwareCapability.CANN_KPOOL_OPS)
+
+
 def model_uses_sfa_sparse(model_config: Any | None) -> bool:
     hf_text_config = getattr(model_config, "hf_text_config", None)
     hf_config = getattr(model_config, "hf_config", None)

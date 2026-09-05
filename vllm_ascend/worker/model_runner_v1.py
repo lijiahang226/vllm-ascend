@@ -4418,12 +4418,26 @@ class NPUModelRunner(GPUModelRunner):
                         is_hidden_state_cache_spec(layer_kv_cache_spec.get(ln))
                         for ln in kv_cache_tensor.shared_by
                     )
+                    # CANN key_pool needs one extra all-zero dummy physical
+                    # block 0 in the GLM-5 compressor-state (tail) cache
+                    # (vLLM block b -> key_pool block b+1, -1 -> 0, plan §5.1).
+                    # The dummy page is added only at this physical allocation
+                    # stage; the kpool reshape below derives N+1 blocks from
+                    # the raw size and the operator only ever addresses the
+                    # first N (vLLM) blocks.
+                    extra_bytes = 0
+                    for layer_name in kv_cache_tensor.shared_by:
+                        spec = layer_kv_cache_spec.get(layer_name)
+                        if isinstance(spec, KpoolTailSpec):
+                            extra_bytes = spec.page_size_bytes
+                            break
+                    tensor_size = kv_cache_tensor.size + extra_bytes
                     if self.vllm_config.kv_transfer_config is None:
-                        tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
+                        tensor = torch.zeros(tensor_size, dtype=torch.int8, device=self.device)
                     else:
-                        cache_size_aligned = kv_cache_tensor.size + alignment
+                        cache_size_aligned = tensor_size + alignment
                         tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
-                        tensor = self._align_memory(tensor, alignment)[: kv_cache_tensor.size]
+                        tensor = self._align_memory(tensor, alignment)[:tensor_size]
 
                     if has_mamba and has_hidden:
                         # Allocate separate tensor for HiddenStateCacheSpec layers
