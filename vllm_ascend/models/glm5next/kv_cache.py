@@ -152,7 +152,14 @@ class KpoolTailManager(FullAttentionManager):
 
 @dataclass(frozen=True, kw_only=True)
 class KpoolTailSpec(SlidingWindowSpec):
-    """One-block circular scratch cache for a kpool indexer's raw tail."""
+    """One-block circular scratch cache for a kpool indexer's raw tail.
+
+    Holds the incomplete pool's raw K plus gate score. CANN ``key_pool``
+    consumes this cache as its FP32 state: one ``[K, gate]`` row per token,
+    laid out as ``[num_blocks + 1, index_kpool, 2 * head_dim]`` where the
+    extra all-zero physical block 0 is the operator's "no update" sentinel
+    (vLLM block ``b`` maps to key_pool block ``b + 1``, ``-1`` to ``0``).
+    """
 
     def max_admission_blocks_per_request(self, max_in_flight_tokens: int, max_model_len: int) -> int:
         return 1

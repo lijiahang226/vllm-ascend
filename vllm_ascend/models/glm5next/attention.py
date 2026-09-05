@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 from vllm.config import (
     CacheConfig,
@@ -26,76 +25,62 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV32IndexerCache,
     yarn_get_mscale,
 )
-from vllm.model_executor.utils import maybe_disable_graph_partition
-from vllm.platforms import current_platform
+from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerBackend,
+    KpoolTailBackend,
+    get_max_prefill_buffer_size,
+)
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from vllm_ascend.models.glm5next.config import Glm5NextConfig
 from vllm_ascend.models.glm5next.kv_cache import KpoolTailSpec
-from vllm_ascend.models.glm5next.ops.kpool_compress import fwht128_quant_fp8
 from vllm_ascend.models.glm5next.sparse_attn_indexer_kpool import SparseAttnIndexerKpool
-
-# Paged MQA page sizes the kpool tail cache aligns against. Upstream reads this
-# from `vllm.utils.deep_gemm`, which is a CUDA-only module on Ascend.
-PAGED_MQA_PAGE_SIZES = (32, 64)
-
-# Shared torch.compile config for the indexer's small-kernel leaves. The MLA
-# indexer runs under breakable-CG (CompilationMode.NONE), which blocks FX-graph
-# fusion of the surrounding eager ops; carving each cluster into its own
-# @torch.compile leaf (backend==inductor) still fuses them. Matches the
-# grouped_topk / _cast_sigmoid leaf pattern.
-_INDEXER_COMPILE = dict(
-    dynamic=True,
-    backend=current_platform.simple_compile_backend,
-    options=maybe_disable_graph_partition(current_platform.simple_compile_backend),
-)
+from vllm_ascend.utils import glm5_next_uses_cann_kpool
 
 
-@torch.compile(**_INDEXER_COMPILE)
-def _fused_indexer_k_norm(
-    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, dim: int, eps: float
-) -> torch.Tensor:
-    # Fuse fp32 cast + layer_norm + cast-back (was 3 kernels) into one.
-    return F.layer_norm(x.float(), (dim,), weight, bias, eps).type_as(x)
+class Glm5NextIndexerBackend(DeepseekV32IndexerBackend):
+    """GLM-5 compressed indexer K cache backend.
 
+    The CANN ``key_pool`` / ``pool_key_indexer`` operators address the
+    compressed cache in the 4-D ``[blocks, block, 1, head_dim]`` layout, so
+    the platform backend overrides the upstream 3-D indexer cache shape.
+    """
 
-@torch.compile(**_INDEXER_COMPILE)
-def _fused_indexer_weight_scale(weights: torch.Tensor, q_scale: torch.Tensor, scale: float) -> torch.Tensor:
-    # Fuse the weight-scaling muls (was 2 kernels) into one. `scale` folds
-    # softmax_scale (head_dim**-0.5) and n_head**-0.5 into a single constant.
-    return (weights.unsqueeze(-1) * q_scale * scale).squeeze(-1)
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "auto",
+    ) -> tuple[int, ...]:
+        assert num_kv_heads == 1
+        return (num_blocks, block_size, num_kv_heads, head_size)
 
-
-@torch.compile(**_INDEXER_COMPILE)
-def _pad_indexer_heads(x: torch.Tensor, pad: int) -> torch.Tensor:
-    # DeepGEMM MQA-logits needs num_heads in {32,64}; zero-pad the head dim.
-    # Fuse new_zeros + cat (was 2 kernels) into one. Pad values are zero (exact
-    # in fp8 e4m3 and zero-weight in the logits sum), so numerically a no-op.
-    return torch.cat([x, x.new_zeros(x.shape[0], pad, *x.shape[2:])], dim=1)
+    @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        if include_num_layers_dimension:
+            return (0, 1, 2, 3)
+        return (0, 1, 2)
 
 
 class Glm5NextIndexerCache(DeepseekV32IndexerCache):
-    """Indexer K cache that stores kpool-compressed entries.
+    """Indexer K cache that stores kpool-compressed BF16 entries.
 
     Setting ``tokens_per_state = index_kpool`` on the KV cache spec makes vLLM's
     indexer metadata builder emit pool-granular ``slot_mapping`` /
     ``seq_lens`` / ``cu_seq_lens`` / ``page_table`` for free, and shrinks the
     cache allocation store one state per ``index_kpool`` tokens. The pool
-    *content* (softmax-weighted sum vs keep-every-Nth) is computed by the
-    kpool compress kernel inside the indexer op — the cache only provides the
+    *content* (softmax-weighted sum vs keep-every-Nth) is computed by the CANN
+    ``key_pool`` operator inside the indexer op — the cache only provides the
     addressing, which is identical for both schemes.
 
     The indexer shares one block with the co-located MLA (a single
     ``MLAAttentionSpec`` / block_table), so ``block_size`` is the model-wide
-    ``cache_config.block_size``. DeepGEMM's paged-MQA kernel
-    (``csrc/apis/attention.hpp``) requires ``block_kv`` to be exactly 32 or
-    64, so the storage block is virtually split into pool pages of the
-    largest such size that tiles it (``storage_kernel_block_size``); this
-    needs ``block_size`` to be a multiple of ``index_kpool * 32`` (512 for
-    ``index_kpool = 16``). A smaller block (e.g. the default 64) silently
-    collapses ``storage_block_size`` (64 // 16 = 4) and only fails later at
-    the opaque C++ assert; ``get_kv_cache_spec`` guards this up front
-    instead.
+    ``cache_config.block_size``. Compressed K is stored plain BF16 (the CANN
+    kpool path allocates no FP8 quant/scale cache).
     """
 
     def __init__(
@@ -124,31 +109,10 @@ class Glm5NextIndexerCache(DeepseekV32IndexerCache):
         # ``tokens_per_state`` is the KV-spec representation of kpool
         # compression in the current cache-layout API.
         assert isinstance(spec, MLAAttentionSpec)
-        spec = replace(spec, tokens_per_state=self._index_kpool)
+        return replace(spec, tokens_per_state=self._index_kpool)
 
-        # DeepGEMM paged-MQA takes block_kv in {32, 64}; the storage block
-        # (= block_size // index_kpool) is virtually split into pool pages of
-        # the largest such size that tiles it, so it must be a multiple of 32.
-        storage_block_size = spec.block_size // self._index_kpool
-        assert spec.block_size % self._index_kpool == 0 and storage_block_size % 32 == 0, (
-            "Glm5NextIndexerCache: kpool indexer requires cache block_size to "
-            f"be a multiple of index_kpool * 32 ({self._index_kpool * 32}) so "
-            "that DeepGEMM paged-MQA pool pages (32 or 64 entries) tile the "
-            f"storage block, got block_size={spec.block_size} -> "
-            f"storage_block_size={storage_block_size}."
-        )
-        max_page_size = max(PAGED_MQA_PAGE_SIZES)
-        min_page_size = min(PAGED_MQA_PAGE_SIZES)
-        if storage_block_size <= max_page_size:
-            page_size = storage_block_size
-        elif storage_block_size % max_page_size == 0:
-            page_size = max_page_size
-        else:
-            page_size = min_page_size
-        return replace(
-            spec,
-            storage_block_size=page_size * self._index_kpool,
-        )
+    def get_attn_backend(self):
+        return Glm5NextIndexerBackend
 
 
 class Glm5NextTailCache(DeepseekV32IndexerCache):
@@ -188,7 +152,7 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
             num_kv_heads=2,
             head_size=self.head_dim,
             head_size_v=0,
-            dtype=torch.bfloat16,
+            dtype=torch.float32,
             sliding_window=self._index_kpool,
         )
 
@@ -222,6 +186,13 @@ class Indexer(nn.Module):
         assert config.index_n_heads is not None
         assert config.index_head_dim is not None
         assert config.index_kpool is not None
+        if not glm5_next_uses_cann_kpool(vllm_config.model_config):
+            raise RuntimeError(
+                "GLM-5.3-Flash sparse (kpool) indexing requires the CANN "
+                "key_pool / pool_key_indexer operators, which are not "
+                "available on this hardware profile. Serve a checkpoint "
+                "whose config leaves `index_topk` unset."
+            )
         self.topk_tokens = config.index_topk
         self.n_head = config.index_n_heads  # 64
         self.head_dim = config.index_head_dim  # 128
@@ -254,41 +225,33 @@ class Indexer(nn.Module):
             prefix=f"{prefix}.wk_weights_proj",
         )
         self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
-        self.softmax_scale = self.head_dim**-0.5
 
-        # Hadamard-128 rotation of the indexer query is fused with the FP8
-        # quant (see forward: fwht128_quant_fp8) -- no precomputed matrix.
-
-        self.scale_fmt = "ue8m0"
-        self.quant_block_size = 128  # TODO: get from config
+        self.scale_fmt = None
+        self.quant_block_size = self.head_dim
         self.topk_indices_buffer = topk_indices_buffer
-        self._wp_fp32: torch.Tensor | None = None
 
-        # NOTE: (zyongye) we use fp8 naive cache,
-        #       where we store value in fp8 and scale in fp32
-        #       per self.quant_block_size element
+        # Compressed indexer K cache: plain BF16 rows (the CANN kpool path
+        # allocates no FP8 quant/scale cache; key_pool writes the compressed
+        # entries and pool_key_indexer reads them in the PA_BBND layout).
         self.k_cache = Glm5NextIndexerCache(
-            head_dim=self.head_dim + self.head_dim // self.quant_block_size * 4,
-            dtype=torch.uint8,
+            head_dim=self.head_dim,
+            dtype=torch.bfloat16,
             prefix=f"{prefix}.k_cache",
             cache_config=cache_config,
             index_kpool=self.index_kpool,
         )
-        # Paged tail cache (in-progress pool's raw K + gate score). Written by
-        # prefill (seeds the boundary pool) and decode (per-step stash); read by
-        # the decode kernel to compress the boundary pool. Transferred across PD
-        # so the decode side sees the prefill tail. See KpoolTailSpec/Manager.
+        # Paged tail cache (in-progress pool's raw K + gate score) doubles as
+        # the CANN key_pool state cache: one FP32 [K, gate] row per token,
+        # addressed through the +1 block table with a dummy physical block 0.
         self.tail_cache = Glm5NextTailCache(
             head_dim=self.head_dim,
-            dtype=torch.bfloat16,
+            dtype=torch.float32,
             prefix=f"{prefix}.tail_cache",
             cache_config=cache_config,
             index_kpool=self.index_kpool,
         )
         self.max_model_len = vllm_config.model_config.max_model_len
         self.prefix = prefix
-        from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
-
         self.max_total_seq_len = get_max_prefill_buffer_size(vllm_config)
         self.indexer_op = SparseAttnIndexerKpool(
             self.k_cache,
@@ -300,79 +263,55 @@ class Indexer(nn.Module):
             self.max_total_seq_len,
             self.topk_indices_buffer,
             tail_cache=self.tail_cache,
+            logical_block_size=cache_config.block_size if cache_config is not None else 0,
+            attn_layer_name=prefix.removesuffix(".indexer"),
         )
 
     def forward(self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb) -> torch.Tensor:
-        q, _ = self.wq_b(qr)
-        q = q.view(-1, self.n_head, self.head_dim)
-
-        # Compute the head gate in fp32; bf16 error can change near-tie pool
-        # rankings on long-context tasks. Cache it after weights are loaded.
-        kw, _ = self.wk_weights_proj(hidden_states)
-        k = kw[:, : self.head_dim]
-        if self._wp_fp32 is None:
-            self._wp_fp32 = self.wk_weights_proj.weight.data[self.head_dim :, :].t().contiguous().float()
-        weights = torch.mm(hidden_states.float(), self._wp_fp32)
-
-        k = _fused_indexer_k_norm(k, self.k_norm.weight, self.k_norm.bias, self.head_dim, self.k_norm.eps)
-
         if self.rope_dim > 0:
-            q_pe, q_nope = torch.split(q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1)
-            k_pe, k_nope = torch.split(k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1)
+            raise NotImplementedError(
+                "GLM-5 CANN key_pool path requires qk_rope_head_dim == 0, "
+                f"got {self.rope_dim}. The AscendC key_pool operator does not "
+                "support RoPE inputs in this stage."
+            )
+        q, _ = self.wq_b(qr)
+        q = q.view(-1, self.n_head, self.head_dim).to(torch.bfloat16)
 
-            q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
-            # Note: RoPE (NeoX) can introduce extra leading dimensions during
-            # compilation so we need to reshape back to token-flattened shapes
-            q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
-            k_pe = k_pe.reshape(-1, 1, self.rope_dim)
-
-            # `rotary_emb` is shape-preserving; `q_pe` is already
-            # [num_tokens, n_head, rope_dim].
-            q = torch.cat([q_pe, q_nope], dim=-1)
-            # `k_pe` is [num_tokens, 1, rope_dim] (MQA).
-            k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
-        # else: qk_rope_head_dim=0 — no rope component. q is already
-        # [num_tokens, n_head, head_dim] and k is [num_tokens, head_dim] (all
-        # nope), so skip the rope split / rotary / cat entirely; otherwise the
-        # split/reshape would build 0-element tensors (breaks dynamo tracing).
-
-        # Rotate Q into the cached K basis before computing fp8 MQA logits.
-        # Fusing the fp32 FWHT and quantization avoids an intermediate HBM
-        # round-trip and bf16 matrix-rounding bias.
-        assert self.head_dim == 128 and self.quant_block_size == 128
-        assert self.scale_fmt == "ue8m0"
-        q = q.view(-1, self.head_dim)
-        q_fp8, q_scale = fwht128_quant_fp8(q)
-        q_fp8 = q_fp8.view(-1, self.n_head, self.head_dim)
-        q_scale = q_scale.view(-1, self.n_head, 1)
-
-        weights = _fused_indexer_weight_scale(weights, q_scale, self.softmax_scale * self.n_head**-0.5)
-
-        # kpool: per-token gate score driving the softmax-weighted pool. Computed
-        # from the same hidden_states that produced `k`, so it stays token-aligned.
-        # F.linear(x, gate) = x @ gate.T  with gate [head_dim, hidden_size].
-        gate_score = F.linear(hidden_states, self.index_kpool_compress_gate)
-
-        # DeepGEMM's MQA-logits kernels (fp8_mqa_logits /
-        # fp8_fp4_paged_mqa_logits) require num_heads in {32, 64}; this
-        # checkpoint uses index_n_heads=16. Zero-pad q and the per-head
-        # weights: logits are a weights-weighted sum over heads, so
-        # zero-weight padded heads contribute exactly nothing.
-        if self.n_head < 32:
-            pad = 32 - self.n_head
-            q_fp8 = _pad_indexer_heads(q_fp8, pad)
-            weights = _pad_indexer_heads(weights, pad)
-
-        return self.indexer_op(
+        # Indexer head weights only: use the last n_head rows of the merged
+        # projection (KeyPool projects K from the first head_dim rows inside).
+        weights = torch.nn.functional.linear(
             hidden_states,
-            q_fp8,
-            k,
+            self.wk_weights_proj.weight[self.head_dim :],
+        )
+        # PoolKeyIndexer applies 1/sqrt(head_dim) and the per-head ReLU
+        # internally, so the framework only carries n_head**-0.5 here.
+        weights = weights * self.n_head**-0.5
+
+        indices = self.indexer_op(
+            hidden_states,
+            q,
+            None,
             weights,
-            gate_score=gate_score,
             compress_ape=self.index_kpool_compress_ape,
             index_kpool=self.index_kpool,
             positions=positions,
+            wk=self.wk_weights_proj.weight[: self.head_dim],
+            gate_weight=self.index_kpool_compress_gate,
+            norm_weight=self.k_norm.weight,
+            norm_bias=self.k_norm.bias,
+            norm_eps=self.k_norm.eps,
         )
+        # The upstream MLA wrapper calls the indexer for its side effect: the
+        # sparse attention backend consumes the top-k buffer.
+        num_tokens = indices.shape[0]
+        if self.topk_indices_buffer is not None:
+            if num_tokens > self.topk_indices_buffer.shape[0]:
+                raise RuntimeError(
+                    "GLM-5 indexer output exceeds the topk buffer rows: "
+                    f"{num_tokens} > {self.topk_indices_buffer.shape[0]}."
+                )
+            self.topk_indices_buffer[:num_tokens].copy_(indices.view(num_tokens, -1))
+        return indices
 
 
 class Glm5NextMLAAttention(nn.Module):
