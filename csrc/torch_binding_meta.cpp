@@ -817,6 +817,38 @@ compressor_meta(const at::Tensor &x, const at::Tensor &wkv, const at::Tensor &wg
     return output;
 }
 
+// Meta implementations use SymInt arithmetic so the operators stay usable
+// under torch.compile / FakeTensor with symbolic shapes (plan §4.2).
+at::Tensor key_pool_meta(const at::Tensor &hidden_states, const at::Tensor &wk,
+                         const at::Tensor &gate_weight, const at::Tensor &ape, at::Tensor &state_cache,
+                         const at::Tensor &cache_block_table, const at::Tensor &start_pos,
+                         const c10::optional<at::Tensor> &norm_weight,
+                         const c10::optional<at::Tensor> &norm_bias, const c10::optional<at::Tensor> &cos,
+                         const c10::optional<at::Tensor> &sin,
+                         const c10::optional<at::Tensor> &cu_seqlens,
+                         const c10::optional<at::Tensor> &seqused, int64_t cmp_ratio, double norm_eps,
+                         int64_t rotary_mode)
+{
+    // Same wrapper-side checks as the PrivateUse1 kernel so FakeTensor paths
+    // fail fast with the same errors (plan §4.2).
+    TORCH_CHECK(norm_weight.has_value() == norm_bias.has_value(),
+                "norm_weight and norm_bias must be passed as a pair");
+    TORCH_CHECK(cos.has_value() == sin.has_value(), "cos and sin must be passed as a pair");
+    TORCH_CHECK(!cos.has_value(), "KeyPool RoPE is not implemented in this stage");
+    TORCH_CHECK(!seqused.has_value(), "seqused is reserved and must be None in this stage");
+    TORCH_CHECK(hidden_states.dim() != 2 || cu_seqlens.has_value(),
+                "cu_seqlens is required for the TND (TH) layout");
+    TORCH_CHECK(cmp_ratio > 0, "cmp_ratio should be greater than 0");
+    // pooled_key: [B, ceil(table_cols * state_block_size / cmp_ratio), wk_rows]
+    c10::SymInt batch = cache_block_table.sym_size(0);
+    c10::SymInt pool_capacity =
+        (cache_block_table.sym_size(1) * state_cache.sym_size(1) + (cmp_ratio - 1)) / cmp_ratio;
+    c10::SymInt head_dim = wk.sym_size(0);
+    at::Tensor pooled_key =
+        at::empty_symint({batch, pool_capacity, head_dim}, hidden_states.options().dtype(hidden_states.dtype()));
+    return pooled_key;
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> compressor_metadata_meta(
     const at::Tensor &rope_cos, const at::Tensor &rope_sin, const at::Tensor &cu_seqlens,
     const at::Tensor &start_pos, const at::Tensor &kv_block_table, int64_t kv_block_size,
@@ -1999,6 +2031,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
     ops.impl("moe_gating_top_k_hash", &vllm_ascend::meta::moe_gating_top_k_hash_meta);
     ops.impl("compressor", &vllm_ascend::meta::compressor_meta);
+    ops.impl("key_pool", &vllm_ascend::meta::key_pool_meta);
     ops.impl("compressor_metadata", &vllm_ascend::meta::compressor_metadata_meta);
     ops.impl("npu_vllm_quant_lightning_indexer", &vllm_ascend::meta::npu_vllm_quant_lightning_indexer_meta);
     ops.impl("npu_vllm_quant_lightning_indexer_metadata", &vllm_ascend::meta::npu_vllm_quant_lightning_indexer_metadata_meta);

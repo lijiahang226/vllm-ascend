@@ -38,6 +38,7 @@
 #include "gmm/grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
 #include "attention/lightning_indexer/lightning_indexer_torch_adpt.h"
+#include "attention/key_pool/key_pool_torch_adpt.h"
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "attention/kv_quant_sparse_flash_attention/kv_quant_sparse_flash_attention_torch_adpt.h"
@@ -2359,6 +2360,19 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> Tensor"
         );
     ops.impl("compressor", torch::kPrivateUse1, &vllm_ascend::compressor);
+
+    ops.def(
+        "key_pool("
+            "Tensor hidden_states, Tensor wk, Tensor gate_weight, "
+            "Tensor ape, Tensor(a!) state_cache, Tensor cache_block_table, "
+            "Tensor start_pos, *, "
+            "Tensor? norm_weight=None, Tensor? norm_bias=None, "
+            "Tensor? cos=None, Tensor? sin=None, Tensor? cu_seqlens=None, "
+            "Tensor? seqused=None, "
+            "int cmp_ratio=4, float norm_eps=1e-6, int rotary_mode=1"
+        ") -> Tensor"
+        );
+    ops.impl("key_pool", torch::kPrivateUse1, &vllm_ascend::key_pool);
 
     ops.def(
         "compressor_metadata("
