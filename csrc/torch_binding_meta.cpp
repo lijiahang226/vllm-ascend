@@ -849,6 +849,45 @@ at::Tensor key_pool_meta(const at::Tensor &hidden_states, const at::Tensor &wk,
     return pooled_key;
 }
 
+std::tuple<at::Tensor, at::Tensor> pool_key_indexer_meta(
+    const at::Tensor &query, const at::Tensor &pool_key, const at::Tensor &weights, const at::Tensor &pool_tail_k,
+    const c10::optional<at::Tensor> &actual_seq_q, const c10::optional<at::Tensor> &actual_seq_k,
+    const c10::optional<at::Tensor> &block_table, const c10::optional<at::Tensor> &q_descale,
+    const c10::optional<at::Tensor> &k_descale, c10::string_view layout_q, c10::string_view layout_k, int64_t topk,
+    int64_t pool_size, int64_t mask_mode, int64_t quant_mode, bool return_value)
+{
+    constexpr int64_t DIM_0 = 0;
+    constexpr int64_t DIM_1 = 1;
+    int64_t indices_len = topk + pool_size - 1;
+    int64_t values_len = topk / pool_size;
+
+    std::string query_layout_str = std::string(layout_q);
+    at::Tensor sparse_indices;
+    at::Tensor sparse_values;
+    if (query_layout_str == "BSND") {
+        TORCH_CHECK(query.dim() == 4, "layout_q=BSND requires a 4-D query");
+        sparse_indices = at::empty_symint({query.sym_size(DIM_0), query.sym_size(DIM_1), indices_len},
+                                          query.options().dtype(at::kInt));
+        if (return_value) {
+            sparse_values = at::empty_symint({query.sym_size(DIM_0), query.sym_size(DIM_1), values_len},
+                                             query.options().dtype(at::kFloat));
+        } else {
+            sparse_values = at::empty({0}, query.options().dtype(at::kFloat));
+        }
+    } else {
+        TORCH_CHECK(query.dim() == 3, "layout_q=TND requires a 3-D query");
+        sparse_indices = at::empty_symint({query.sym_size(DIM_0), indices_len},
+                                          query.options().dtype(at::kInt));
+        if (return_value) {
+            sparse_values = at::empty_symint({query.sym_size(DIM_0), values_len},
+                                             query.options().dtype(at::kFloat));
+        } else {
+            sparse_values = at::empty({0}, query.options().dtype(at::kFloat));
+        }
+    }
+    return std::tuple<at::Tensor, at::Tensor>(sparse_indices, sparse_values);
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> compressor_metadata_meta(
     const at::Tensor &rope_cos, const at::Tensor &rope_sin, const at::Tensor &cu_seqlens,
     const at::Tensor &start_pos, const at::Tensor &kv_block_table, int64_t kv_block_size,
@@ -2032,6 +2071,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("moe_gating_top_k_hash", &vllm_ascend::meta::moe_gating_top_k_hash_meta);
     ops.impl("compressor", &vllm_ascend::meta::compressor_meta);
     ops.impl("key_pool", &vllm_ascend::meta::key_pool_meta);
+    ops.impl("pool_key_indexer", &vllm_ascend::meta::pool_key_indexer_meta);
     ops.impl("compressor_metadata", &vllm_ascend::meta::compressor_metadata_meta);
     ops.impl("npu_vllm_quant_lightning_indexer", &vllm_ascend::meta::npu_vllm_quant_lightning_indexer_meta);
     ops.impl("npu_vllm_quant_lightning_indexer_metadata", &vllm_ascend::meta::npu_vllm_quant_lightning_indexer_metadata_meta);

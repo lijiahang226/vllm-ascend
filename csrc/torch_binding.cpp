@@ -39,6 +39,7 @@
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
 #include "attention/lightning_indexer/lightning_indexer_torch_adpt.h"
 #include "attention/key_pool/key_pool_torch_adpt.h"
+#include "attention/pool_key_indexer/pool_key_indexer_torch_adpt.h"
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "attention/kv_quant_sparse_flash_attention/kv_quant_sparse_flash_attention_torch_adpt.h"
@@ -2373,6 +2374,19 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> Tensor"
         );
     ops.impl("key_pool", torch::kPrivateUse1, &vllm_ascend::key_pool);
+
+    ops.def(
+        "pool_key_indexer("
+            "Tensor query, Tensor pool_key, Tensor weights, "
+            "Tensor pool_tail_k, *, "
+            "Tensor? actual_seq_q=None, Tensor? actual_seq_k=None, "
+            "Tensor? block_table=None, Tensor? q_descale=None, Tensor? k_descale=None, "
+            "str layout_q=\"BSND\", str layout_k=\"BSND\", "
+            "int topk=128, int pool_size=1, int mask_mode=0, int quant_mode=-1, "
+            "bool return_value=False"
+        ") -> (Tensor, Tensor)"
+        );
+    ops.impl("pool_key_indexer", torch::kPrivateUse1, &vllm_ascend::pool_key_indexer);
 
     ops.def(
         "compressor_metadata("
