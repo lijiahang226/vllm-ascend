@@ -836,6 +836,13 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.is_draft_model = self.vllm_config.model_config.runner_type == "draft"
         self.enable_mlapo = not self.is_draft_model and enabling_mlapo(self.vllm_config)
 
+        # GLM-5 Indexer KPool sparse MLA: the model's Indexer module writes the
+        # per-query top-k token ids into this buffer; the sparse branch below
+        # consumes it (vLLM passes these through the MLA layer kwargs).
+        self.is_sparse = kwargs.get("is_sparse", False)
+        self.topk_indices_buffer = kwargs.get("topk_indices_buffer")
+        self.indexer = kwargs.get("indexer")
+
         self.layer_name = kwargs.get("layer_name")
         self.fa_quant_layer = enable_fa_quant(self.vllm_config, self.layer_name)
         if self.fa_quant_layer:
@@ -2029,6 +2036,116 @@ class AscendMLAImpl(MLAAttentionImpl):
     ) -> torch.Tensor:
         raise NotImplementedError("forward_mqa is not supported for MLA attention. Use forward() instead.")
 
+    def _forward_sparse_kpool(
+        self,
+        layer_name: str,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: M,
+        output: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Sparse MLA attention for the GLM-5 Indexer KPool path.
+
+        The model's ``Indexer`` (``SparseAttnIndexerKpool`` via CANN
+        ``key_pool`` / ``pool_key_indexer``) already wrote the per-query
+        top-k token ids into ``topk_indices_buffer``. This branch runs the
+        shared MLA preprocess (which also writes the full paged MLA KV
+        cache) and then dispatches ``npu_sparse_flash_attention``
+        (``sparse_mode=3``, ``attention_mode=2``) over the top-k set, one
+        row per query, in the PA_BSND paged layout.
+
+        GLM-5.3-Flash sparse indexers are NoPE-only (CANN ``key_pool`` has
+        no RoPE input), so zero-width rope operands are used, following the
+        dense MLA-NoPE convention.
+
+        NOTE: This sparse end-to-end branch has not been validated on NPU
+        hardware yet; the dense NoPE MLA path remains fully supported.
+        """
+        assert output is not None, "Output tensor must be provided."
+        num_actual_tokens = self.get_num_actual_tokens(attn_metadata)
+        if num_actual_tokens == 0:
+            return output
+        if self.qk_rope_head_dim != 0:
+            raise RuntimeError(
+                "GLM-5 Indexer KPool MLA only supports the NoPE MLA config "
+                f"(qk_rope_head_dim == 0), got {self.qk_rope_head_dim}."
+            )
+        topk_indices = self.topk_indices_buffer[:num_actual_tokens]
+        if topk_indices.dim() == 2:
+            # [T, topk + kpool - 1] -> [T, 1, K] (single-head MQA top-k set)
+            topk_indices = topk_indices.unsqueeze(1)
+        if topk_indices.shape[-1] == 0:
+            raise RuntimeError("GLM-5 sparse MLA received an empty top-k buffer.")
+
+        # Shared MLA preprocess: projects q_c / kv, writes the full paged MLA
+        # KV cache and returns the per-token query/key splits.
+        decode_preprocess_res, prefill_preprocess_res = self._mla_preprocess(
+            layer_name, hidden_states, kv_cache, attn_metadata
+        )
+
+        # TND query ends and per-request key lengths: the sparse flash
+        # attention operator consumes these as per-request bounds.
+        num_reqs = attn_metadata.query_start_loc.shape[0] - 1
+        actual_seq_lengths_query = attn_metadata.query_start_loc[1 : num_reqs + 1].to(torch.int64)
+        actual_seq_lengths_key = attn_metadata.seq_lens[:num_reqs].to(torch.int64)
+        block_table = attn_metadata.block_tables
+
+        kv = kv_cache[0]
+        # MLA-NoPE: zero-width rope operands from the live paged cache shape.
+        key_rope = torch.zeros(
+            (*kv.shape[:2], 1, self.qk_rope_head_dim),
+            dtype=kv.dtype,
+            device=kv.device,
+        )
+
+        o_proj_input = torch.zeros(
+            (_EXTRA_CTX.num_tokens, self.num_heads * self.v_head_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+
+        def _sparse_attention(ql_nope: torch.Tensor) -> torch.Tensor:
+            q_pe = torch.zeros(
+                (*ql_nope.shape[:2], self.qk_rope_head_dim),
+                dtype=ql_nope.dtype,
+                device=ql_nope.device,
+            )
+            return torch.ops._C_ascend.npu_sparse_flash_attention(
+                query=ql_nope,
+                key=kv,
+                value=kv,
+                sparse_indices=topk_indices,
+                scale_value=self.scale,
+                sparse_block_size=1,
+                block_table=block_table,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_kv=actual_seq_lengths_key,
+                query_rope=q_pe,
+                key_rope=key_rope,
+                layout_query="TND",
+                layout_kv="PA_BSND",
+                sparse_mode=3,
+                attention_mode=2,
+                return_softmax_lse=False,
+            )
+
+        if decode_preprocess_res is not None and prefill_preprocess_res is not None:
+            raise NotImplementedError(
+                "GLM-5 sparse MLA does not yet support mixed decode+prefill "
+                "batches; run decode and prefill in separate steps."
+            )
+        if decode_preprocess_res is not None:
+            o_proj_input[:num_actual_tokens] = _sparse_attention(decode_preprocess_res.ql_nope)
+        elif prefill_preprocess_res is not None:
+            o_proj_input[:num_actual_tokens] = _sparse_attention(prefill_preprocess_res.q_nope)
+        else:
+            raise RuntimeError("GLM-5 sparse MLA received no decode or prefill preprocess result.")
+
+        output[:num_actual_tokens].view(num_actual_tokens, self.num_heads, self.v_head_dim).copy_(
+            o_proj_input[:num_actual_tokens]
+        )
+        return output
+
     def forward(
         self,
         layer_name,
@@ -2041,6 +2158,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         if attn_metadata is None:
             # Profiling run.
             return output.fill_(0)
+
+        if self.is_sparse and self.topk_indices_buffer is not None:
+            return self._forward_sparse_kpool(layer_name, hidden_states, kv_cache, attn_metadata, output)
 
         num_actual_tokens = self.get_num_actual_tokens(attn_metadata)
         assert (
