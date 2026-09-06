@@ -105,14 +105,22 @@ class Glm5NextTailMetadataBuilder(AttentionMetadataBuilder):
                 self.kv_cache_spec.block_size,
                 out=slot_mapping_buffer,
             )
+        # vllm 0.27.1's CommonAttentionMetadata has no num_decodes /
+        # num_prefills split fields; derive them from is_prefilling.
+        if getattr(common_attn_metadata, "is_prefilling", False):
+            num_decodes, num_prefills = 0, common_attn_metadata.num_reqs
+            num_decode_tokens, num_prefill_tokens = 0, common_attn_metadata.num_actual_tokens
+        else:
+            num_decodes, num_prefills = common_attn_metadata.num_reqs, 0
+            num_decode_tokens, num_prefill_tokens = common_attn_metadata.num_actual_tokens, 0
         return DeepseekV32IndexerMetadata(
             seq_lens=common_attn_metadata.seq_lens,
             max_seq_len=common_attn_metadata.max_seq_len,
             slot_mapping=slot_mapping,
-            num_decodes=common_attn_metadata.num_decodes,
-            num_decode_tokens=common_attn_metadata.num_decode_tokens,
-            num_prefills=common_attn_metadata.num_prefills,
-            num_prefill_tokens=common_attn_metadata.num_prefill_tokens,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
+            num_prefills=num_prefills,
+            num_prefill_tokens=num_prefill_tokens,
         )
 
 
