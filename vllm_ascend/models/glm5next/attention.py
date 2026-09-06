@@ -121,10 +121,14 @@ class Glm5NextIndexerCache(DeepseekV32IndexerCache):
         from dataclasses import replace
 
         spec = super().get_kv_cache_spec(vllm_config)
-        # ``tokens_per_state`` is the KV-spec representation of kpool
-        # compression in the current cache-layout API.
+        # ``tokens_per_state`` (vLLM main) / ``compress_ratio`` (vllm 0.27.1)
+        # is the KV-spec representation of kpool compression in the current
+        # cache-layout API.
         assert isinstance(spec, MLAAttentionSpec)
-        spec = replace(spec, tokens_per_state=self._index_kpool)
+        if "tokens_per_state" in MLAAttentionSpec.__dataclass_fields__:
+            spec = replace(spec, tokens_per_state=self._index_kpool)
+        else:
+            spec = replace(spec, compress_ratio=self._index_kpool)
 
         # DeepGEMM paged-MQA takes block_kv in {32, 64}; the storage block
         # (= block_size // index_kpool) is virtually split into pool pages of
@@ -193,9 +197,15 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
         )
 
     def get_attn_backend(self):
-        from vllm.v1.attention.backends.mla.indexer import KpoolTailBackend
+        try:
+            from vllm.v1.attention.backends.mla.indexer import KpoolTailBackend
 
-        return KpoolTailBackend
+            return KpoolTailBackend
+        except ImportError:
+            # vllm 0.27.1: the kpool tail cache backend lives in the plugin.
+            from vllm_ascend.models.glm5next.indexer_tail_backend import Glm5NextTailBackend
+
+            return Glm5NextTailBackend
 
 
 class Indexer(nn.Module):
