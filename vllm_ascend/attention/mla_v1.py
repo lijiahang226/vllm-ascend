@@ -869,12 +869,23 @@ class AscendMLAImpl(MLAAttentionImpl):
             # mla_graph_keys_filter: hybrid models such as GLM-5.3-Flash put KDA
             # layers in the same metadata dict, but only MLA layers contribute a
             # captured FIA op, so zipping unfiltered keys against attn_params
-            # pairs MLA params with KDA layer names.
-            attn_keys = [k for k in attn_metadata[0] if getattr(attn_metadata[0][k], "decode", None) is not None]
+            # pairs MLA params with KDA layer names. The kpool indexer / tail
+            # cache layers also expose a ``decode`` field (DeepseekV32Indexer
+            # metadata, without MLA decode fields), so filter on the MLA
+            # decode field itself rather than ``decode is not None``.
+            attn_keys = [
+                k
+                for k in attn_metadata[0]
+                if getattr(getattr(attn_metadata[0][k], "decode", None), "seq_lens_list", None) is not None
+            ]
         else:
             graph_params = get_graph_params()
             attn_metadata = forward_context.attn_metadata
-            attn_keys = [k for k in attn_metadata if getattr(attn_metadata[k], "decode", None) is not None]
+            attn_keys = [
+                k
+                for k in attn_metadata
+                if getattr(getattr(attn_metadata[k], "decode", None), "seq_lens_list", None) is not None
+            ]
         # FIXME: Behold! We are using a temporary hack here to update the args
         # for each layer's attention op in the graph.
         num_layers = len(attn_keys)
