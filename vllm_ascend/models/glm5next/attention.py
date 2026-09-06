@@ -225,6 +225,11 @@ class Indexer(nn.Module):
             prefix=f"{prefix}.wk_weights_proj",
         )
         self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
+        # Kept for the upstream MLA wrapper (vllm_ascend.ops.mla.IndexerWrapper
+        # reads ``indexer.softmax_scale``); the CANN key_pool path does not use
+        # it as a framework-side scale (the operator applies 1/sqrt(head_dim)
+        # internally).
+        self.softmax_scale = self.head_dim**-0.5
 
         self.scale_fmt = None
         self.quant_block_size = self.head_dim
