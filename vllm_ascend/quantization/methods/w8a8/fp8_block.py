@@ -82,18 +82,32 @@ def resolve_block_scales(
             "`weight_scale_inv` are mismatched or unpaired."
         )
 
+    # Widen fp8 to fp32 without a dtype-cast op: several Ascend stacks do not
+    # implement the dtype casts for ``DT_FLOAT8_E4M3FN`` (Ascend A3 with CANN
+    # 9.1 raises aclnnInplaceCopy 561 / aclnnCast 161002, for example), so
+    # ``.to(torch.float32)`` cannot be used there. A byte-level 256-entry decode
+    # table plus an indexed read only needs an integer copy and a gather, is
+    # bit-identical to torch's own fp8 -> fp32 widening, and never leaves the
+    # weight device. Load-time only; not a hot path.
+    decode_table = (
+        torch.arange(256, dtype=torch.uint8)
+        .view(torch.float8_e4m3fn)
+        .to(torch.float32)
+        .to(device=weight.device)
+    )
     resolved = torch.empty((out_features, in_features), dtype=out_dtype, device=weight.device)
     rows_per_step = max(block_n, _ROWS_PER_DEQUANT_STEP // block_n * block_n)
     for row_start in range(0, out_features, rows_per_step):
         row_end = min(row_start + rows_per_step, out_features)
         # Keep dtype conversion on the weight device so a CPU-resident scale
-        # cannot multiply an NPU weight. Same-device `.to()` is a no-op.
+        # cannot multiply an NPU weight.
         row_scales = scale_inv[row_start // block_n : cdiv(row_end, block_n)].to(
             device=weight.device, dtype=torch.float32
         )
         row_scales = row_scales.repeat_interleave(block_n, dim=0)[: row_end - row_start]
         row_scales = row_scales.repeat_interleave(block_k, dim=1)[:, :in_features]
-        resolved[row_start:row_end] = weight[row_start:row_end].to(torch.float32) * row_scales
+        w_row = decode_table[weight[row_start:row_end].view(torch.uint8).to(torch.int64)]
+        resolved[row_start:row_end] = w_row * row_scales
     return resolved
 
 
