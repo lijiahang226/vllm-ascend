@@ -5172,12 +5172,25 @@ class NPUModelRunner(GPUModelRunner):
                 attn_backend = group_key.attn_backend
                 kv_cache_spec = group_key.kv_cache_spec
                 attn_metadata_builders = []
+                builder_cls = attn_backend.get_builder_cls()
+                builder_kwargs = {}
+                if getattr(builder_cls, "requires_block_table_width", False):
+                    # vllm 0.27.1 indexer builders require the block-table width.
+                    from vllm.v1.worker.block_table import get_block_table_width
+
+                    max_num_blocks = kv_cache_spec.max_num_blocks_per_req(
+                        self.vllm_config, self.vllm_config.model_config.max_model_len
+                    )
+                    builder_kwargs["block_table_width"] = get_block_table_width(
+                        max_num_blocks, kv_cache_spec.block_size
+                    )
                 attn_metadata_builders.append(
-                    attn_backend.get_builder_cls()(
+                    builder_cls(
                         kv_cache_spec,
                         layer_names,
                         self.vllm_config,
                         self.device,
+                        **builder_kwargs,
                     )
                 )
                 attn_group = AttentionGroup(

@@ -106,13 +106,15 @@ class Glm5NextTailMetadataBuilder(AttentionMetadataBuilder):
                 out=slot_mapping_buffer,
             )
         # vllm 0.27.1's CommonAttentionMetadata has no num_decodes /
-        # num_prefills split fields; derive them from is_prefilling.
-        if getattr(common_attn_metadata, "is_prefilling", False):
-            num_decodes, num_prefills = 0, common_attn_metadata.num_reqs
-            num_decode_tokens, num_prefill_tokens = 0, common_attn_metadata.num_actual_tokens
-        else:
-            num_decodes, num_prefills = common_attn_metadata.num_reqs, 0
-            num_decode_tokens, num_prefill_tokens = common_attn_metadata.num_actual_tokens, 0
+        # num_prefills split fields (its is_prefilling is a per-token bool
+        # tensor whose bool() conversion would sync the device stream, which
+        # ACLGraph capture forbids). The tail cache is storage-only, so report
+        # the whole batch as prefill: these counts are not consumed for the
+        # circular tail scratch.
+        num_decodes = 0
+        num_prefills = common_attn_metadata.num_reqs
+        num_decode_tokens = 0
+        num_prefill_tokens = common_attn_metadata.num_actual_tokens
         return DeepseekV32IndexerMetadata(
             seq_lens=common_attn_metadata.seq_lens,
             max_seq_len=common_attn_metadata.max_seq_len,
