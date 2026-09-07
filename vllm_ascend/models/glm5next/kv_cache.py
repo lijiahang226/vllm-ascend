@@ -161,6 +161,17 @@ class KpoolTailSpec(SlidingWindowSpec):
     (vLLM block ``b`` maps to key_pool block ``b + 1``, ``-1`` to ``0``).
     """
 
+    # Generic allocator hook: reserve one extra all-zero physical block 0 as the
+    # kernel's "no update" sentinel. Physical allocators honour this attribute
+    # instead of importing this model-specific spec, so the dummy-page policy
+    # can be traded upstream together with the rest of the kv-cache management.
+    requires_dummy_zero_block: ClassVar[bool] = True
+
+    # Identity marker for the per-request one-block tail scratch cache, so
+    # generic infra (runner dims/metadata) detects it without importing this
+    # model-specific spec class.
+    kpool_tail_scratch: ClassVar[bool] = True
+
     def max_admission_blocks_per_request(self, max_in_flight_tokens: int, max_model_len: int) -> int:
         return 1
 
