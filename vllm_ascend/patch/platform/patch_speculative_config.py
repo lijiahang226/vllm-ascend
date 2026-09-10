@@ -47,9 +47,6 @@ def _normalize_legacy_qwen3_dspark_config(hf_config: PretrainedConfig) -> Pretra
                 "architectures": ["Glm5NextMTPModel"],
             }
         )
-    if hf_config.model_type in ("glm5_next", "glm5_next_text", "glm5_next_mtp"):
-        # Each draft step must update the pooled key/state caches.
-        hf_config.update({"index_share_for_mtp_iteration": False})
     return hf_config
 
 
