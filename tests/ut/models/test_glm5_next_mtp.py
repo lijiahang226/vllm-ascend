@@ -74,6 +74,7 @@ def _make_mtp_loader(params):
         qk_rope_head_dim=0,
     )
     mtp.model = SimpleNamespace(
+        layers={},
         mtp_start_layer_idx=45,
         num_mtp_layers=1,
     )
