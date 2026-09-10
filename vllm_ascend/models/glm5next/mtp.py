@@ -299,7 +299,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         own_head_weight = f"model.layers.{self.model.mtp_start_layer_idx}.shared_head.head.weight"
         self.has_own_lm_head = own_head_weight in loaded_weights
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[typing.Any, ...]]) -> set[str]:
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
@@ -313,7 +313,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts,
+            num_experts=self.config.n_routed_experts or 0,
         )
 
         params_dict = dict(self.named_parameters())
@@ -324,7 +324,9 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         kv_a_pad_size = 0
         if self.config.mla_nope and self.config.qk_rope_head_dim > 0:
             kv_a_pad_size = self.config.qk_rope_head_dim
-        for name, loaded_weight in weights:
+        for args in weights:
+            name, loaded_weight, *extra = args
+            kwargs = extra[0] if extra else {}
             name = self.hf_to_vllm_mapper._map_name(name)
             if name is None:
                 continue
@@ -336,6 +338,8 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             # prefix to match.
             if name.startswith("model.language_model."):
                 name = name.replace("model.language_model.", "model.", 1)
+            elif name.startswith("layers."):
+                name = "model." + name
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:
                 continue
@@ -380,7 +384,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                weight_loader(param, loaded_weight, shard_id, **kwargs)
                 break
             else:
                 is_expert_weight = False
@@ -399,6 +403,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                         shard_id=shard_id,
                         expert_id=expert_id,
                         return_success=True,
+                        **kwargs,
                     )
                     if success:
                         name = name_mapped
@@ -415,7 +420,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                         continue
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                    weight_loader(param, loaded_weight)
+                    weight_loader(param, loaded_weight, **kwargs)
             loaded_params.add(name)
 
         _mark_zero_initialized_rms_norm_biases(self, loaded_params)
