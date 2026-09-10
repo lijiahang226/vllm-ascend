@@ -182,6 +182,7 @@ from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
+from vllm_ascend.spec_decode.glm5next_proposer import AscendGlm5NextMTPProposer
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
@@ -4215,7 +4216,7 @@ class NPUModelRunner(GPUModelRunner):
                 AscendEagleProposer | AscendDflashProposer | AscendDSparkProposer | AscendDraftModelProposer,
             )
             kernel_block_sizes = self.kernel_block_sizes
-            if isinstance(self.drafter, AscendDSparkProposer):
+            if isinstance(self.drafter, (AscendDSparkProposer, AscendGlm5NextMTPProposer)):
                 sizes = kernel_block_sizes if isinstance(kernel_block_sizes, list) else [kernel_block_sizes]
                 draft_kernel_block_sizes = [
                     int(size[0] if isinstance(size, (list, tuple)) else size) for size in sizes
