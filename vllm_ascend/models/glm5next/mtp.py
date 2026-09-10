@@ -25,9 +25,13 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .model import (
+    GLM5_PACKED_MODULES_MAPPING,
+    GLM5_WEIGHTS_MAPPER,
+    MTP_ROT_WEIGHT_NAME,
     Glm5NextDecoderLayer,
     Glm5NextMLAAttention,
     Glm5NextMoE,
+    _pad_nope_kv_a_weight,
     _try_load_fp8_attn_proj,
     _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
@@ -42,6 +46,10 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
         config = vllm_config.speculative_config.draft_model_config.hf_config
         self.config = config
         quant_config = vllm_config.quant_config
+        quant_description = getattr(quant_config, "quant_description", None) or {}
+        self.is_rot_used = bool(quant_description.get("is_rot_used", False))
+        if self.is_rot_used:
+            self.rot = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -85,6 +93,8 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
         spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
+        if self.is_rot_used:
+            previous_hidden_states = self.rot(previous_hidden_states)
         # Fused: zero pos-0 embeds + enorm(embeds) + hnorm(prev) + cat -> [N, 2H].
         eh_input = fused_eh_norm(
             positions,
@@ -197,6 +207,9 @@ class Glm5NextMultiTokenPredictor(nn.Module):
 
 
 class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
+    hf_to_vllm_mapper = GLM5_WEIGHTS_MAPPER
+    packed_modules_mapping = GLM5_PACKED_MODULES_MAPPING
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
@@ -249,6 +262,8 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         return self.model.get_top_tokens(hidden_states, spec_step_idx)
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
+        if name == MTP_ROT_WEIGHT_NAME:
+            return f"model.layers.{spec_layer}.rot.weight"
         spec_layer_weight_names = [
             "embed_tokens",
             "enorm",
@@ -309,6 +324,9 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         if self.config.mla_nope and self.config.qk_rope_head_dim > 0:
             kv_a_pad_size = self.config.qk_rope_head_dim
         for name, loaded_weight in weights:
+            name = self.hf_to_vllm_mapper._map_name(name)
+            if name is None:
+                continue
             if "rotary_emb.inv_freq" in name:
                 continue
             # Multimodal (Glm5NextForConditionalGeneration) checkpoints prefix
@@ -346,6 +364,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ):
                 continue
 
+            loaded_weight = _pad_nope_kv_a_weight(self.config, name, loaded_weight)
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -409,5 +428,8 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         ):
             if layer_idx not in loaded_layers:
                 raise ValueError(f"MTP speculative decoding layer {layer_idx} weights missing from checkpoint.")
+        for layer_idx, layer in self.model.layers.items():
+            if layer.is_rot_used and f"model.layers.{layer_idx}.rot.weight" not in loaded_params:
+                raise ValueError(f"ModelSlim MTP layer {layer_idx} requires rot.weight when is_rot_used is enabled.")
         self._maybe_set_own_lm_head(loaded_params)
         return loaded_params

@@ -460,7 +460,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             )
             prefix = hf_to_vllm_mapper._map_name(prefix)
 
-        if model_type == "step3p5_mtp" and prefix.startswith("model.layers."):
+        if model_type in ("step3p5_mtp", "glm5_next_mtp") and prefix.startswith("model.layers."):
             # Step3P5 MTP and newly generated Step3P7 W8A8 MTP checkpoints use
             # ``model.layers.*``.  The Step3P7 vLLM wrapper mapper rewrites
             # current ``model.layers.*`` quant descriptions to
