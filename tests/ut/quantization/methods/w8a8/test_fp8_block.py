@@ -60,6 +60,13 @@ def make_block_weight(out_features, in_features, block_n, block_k, seed=0):
 
 
 class TestResolveBlockScales(TestBase):
+    def test_decodes_every_fp8_bit_pattern(self):
+        raw_values = torch.arange(256, dtype=torch.uint8)
+        weight = raw_values.view(torch.float8_e4m3fn).reshape(16, 16)
+        resolved = resolve_block_scales(weight, torch.ones(2, 2), 8, 8, torch.float32)
+        expected = weight.to(torch.float32)
+        torch.testing.assert_close(resolved, expected, rtol=0, atol=0, equal_nan=True)
+
     def test_matches_per_element_expansion(self):
         weight, scale_inv = make_block_weight(16, 12, 4, 3)
         resolved = resolve_block_scales(weight, scale_inv, 4, 3, torch.float32)
