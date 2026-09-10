@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import torch
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -21,6 +22,7 @@ from vllm.v1.worker.utils import select_common_block_size
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.sparse_mla import SparseMLAMetadataState, sparse_mla
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
     SFA_QSFA_TILE_SIZE,
@@ -29,6 +31,7 @@ from vllm_ascend.attention.utils import (
     get_sfa_qsfa_packed_head_dim,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
+    scatter_paged_cache,
     trans_rope_weight,
     transdata,
     wait_for_kv_layer_from_connector,
@@ -156,11 +159,11 @@ class AscendSFAMetadata:
     num_actual_tokens: int  # Number of tokens excluding padding.
     slot_mapping: torch.Tensor
     seq_lens: torch.Tensor
-    seq_lens_cpu: torch.Tensor
+    seq_lens_cpu: torch.Tensor | None
     cum_query_lens: torch.Tensor
     block_table: torch.Tensor
-    sin: torch.Tensor
-    cos: torch.Tensor
+    sin: torch.Tensor | None
+    cos: torch.Tensor | None
 
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
@@ -182,6 +185,12 @@ class AscendSFAMetadata:
     # by AscendSFAKVOffloadMetadataBuilder.
     req_ids_tensor: torch.Tensor | None = None
     token_to_req: torch.Tensor | None = None
+    positions: torch.Tensor | None = None
+    query_start_loc: torch.Tensor | None = None
+    max_query_len: int = 0
+    max_seq_len: int = 0
+    smla_metadata: torch.Tensor | None = None
+    smla_topk_length: torch.Tensor | None = None
 
 
 M = TypeVar("M", bound=AscendSFAMetadata)
@@ -224,6 +233,13 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
 
         # Match the logical block size selected for BlockTable.
         self.kernel_block_size = select_common_block_size(kv_cache_spec.block_size, [AscendSFABackend])
+
+        layer = vllm_config.compilation_config.static_forward_context[layer_names[0]]
+        self.nope = layer.qk_rope_head_dim == 0
+        self.nope_states: dict[int | None, SparseMLAMetadataState] = {}
+        self.nope_indexer = None
+        if self.nope:
+            self.nope_indexer = layer.impl.indexer
 
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
@@ -341,10 +357,17 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
         elif common_attn_metadata.seq_lens_cpu is not None:
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
+        elif self.nope:
+            # MTP accepted counts are device-resident. NoPE operators use
+            # device lengths and scheduler upper bounds, so need no CPU copy.
+            seq_lens_cpu = None
         else:
             seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
 
-        cos, sin = get_cos_and_sin_mla(input_positions, use_cache=(draft_index is None))
+        if self.nope:
+            cos, sin = None, None
+        else:
+            cos, sin = get_cos_and_sin_mla(input_positions, use_cache=(draft_index is None))
 
         cos, sin, slot_mapping, parallel_metadata = self._prepare_parallel_metadata(
             common_attn_metadata,
@@ -365,7 +388,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
                 block_size,
             )
 
-        return self.metadata_cls(  # type: ignore
+        metadata = self.metadata_cls(  # type: ignore
             num_input_tokens=common_attn_metadata.num_input_tokens,
             num_actual_tokens=num_actual_tokens,
             cum_query_lens=cum_query_lens,
@@ -377,14 +400,33 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             attn_mask=self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config),
             attn_state=common_attn_metadata.attn_state,
             block_table=block_table,
-            sin=sin[:num_input_tokens],
-            cos=cos[:num_input_tokens],
+            sin=None if sin is None else sin[:num_input_tokens],
+            cos=None if cos is None else cos[:num_input_tokens],
+            positions=input_positions,
+            query_start_loc=common_attn_metadata.query_start_loc[: num_reqs + 1],
+            max_query_len=common_attn_metadata.max_query_len,
+            max_seq_len=common_attn_metadata.max_seq_len,
             block_size=block_size,
             group_len=common_attn_metadata.group_len,
             group_key_idx=common_attn_metadata.group_key_idx,
             group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
             **parallel_metadata,
         )
+        if self.nope:
+            query_lens = (
+                common_attn_metadata.query_start_loc_cpu[1 : num_reqs + 1]
+                - common_attn_metadata.query_start_loc_cpu[:num_reqs]
+            )
+            is_prefilling = query_lens > getattr(common_attn_metadata, "decode_token_per_req", 1)
+            metadata.num_prefills = int(is_prefilling.sum())
+            metadata.num_decodes = num_reqs - metadata.num_prefills
+            metadata.num_decode_tokens = int(query_lens[~is_prefilling].sum())
+            if draft_index not in self.nope_states:
+                self.nope_states[draft_index] = SparseMLAMetadataState(
+                    self.kv_cache_spec, self.vllm_config, self.device, self.nope_indexer, self.kernel_block_size
+                )
+            self.nope_states[draft_index].prepare(metadata)
+        return metadata
 
     def build_for_cudagraph_capture(
         self,
@@ -451,6 +493,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.kv_b_proj = kwargs["kv_b_proj"]
         self.o_proj = kwargs["o_proj"]
         self.indexer = kwargs["indexer"]
+        self.g_proj = kwargs.get("g_proj")
+        # NoPE sparse layers use the same SFA template and native prefill;
+        # they do not need an upstream dense-MHA prefill backend.
+        if self.qk_rope_head_dim == 0:
+            self.supports_dense_mha_prefill = False
         self.kv_a_proj_with_mqa = kwargs.get("kv_a_proj_with_mqa")
         self.kv_a_layernorm = kwargs.get("kv_a_layernorm")
         self.q_a_layernorm = kwargs.get("q_a_layernorm")
@@ -504,6 +551,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         # The user-facing switches control these layouts independently. LI C8
         # applies only to layers that own an indexer cache.
         self.enable_sparse_sfa_c8 = ascend_config.enable_sparse_sfa_c8
+        if self.qk_rope_head_dim == 0 and self.enable_sparse_sfa_c8:
+            raise NotImplementedError("NoPE SFA currently requires an unquantized latent KV cache.")
         self.enable_sparse_li_c8 = self.has_indexer and self.indexer.enable_sparse_li_c8
         if self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8:
             if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
@@ -635,6 +684,8 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def _get_fused_type_unsupported_reasons(self, pp_type: PreprocessType) -> list[str]:
         reasons = []
+        if self.qk_rope_head_dim == 0:
+            reasons.append("NoPE SFA currently uses native preprocessing; fused NoPE contracts are not enabled.")
         if self.kv_a_layernorm is None or self.q_a_layernorm is None:
             reasons.append("Fused preprocessing requires q_a_layernorm and kv_a_layernorm.")
         if self.fused_qkv_a_proj is None:
@@ -820,6 +871,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         slots: torch.Tensor,
         attn_metadata: M,
     ):
+        if self.qk_rope_head_dim == 0:
+            assert self.kv_a_layernorm is not None
+            values = self.kv_a_layernorm(kv_no_split.reshape(-1, self.kv_lora_rank))
+            cache = kv_cache[0]
+            scatter_paged_cache(cache, slots[: values.shape[0]].long(), values.to(cache.dtype), cache.shape[1])
+            return None, None
         B = kv_no_split.shape[0]
         N = self.num_kv_heads
         S = 1
@@ -1109,6 +1166,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         actual_seq_lengths_key,
         block_table=None,
     ):
+        if self.qk_rope_head_dim == 0:
+            return sparse_mla(ql_nope, kv_cache[0], topk_indices, attn_metadata, self.scale)
         return DeviceOperator.execute_sparse_flash_attention_process(
             self,
             ql_nope,
@@ -1250,7 +1309,20 @@ class AscendSFAImpl(MLAAttentionImpl):
         # separate cache specs, while the current kernel path still expects the
         # legacy combined tuple layout.
         main_cache = kv_cache
-        if main_cache is None or not self.has_indexer:
+        if main_cache is None:
+            return None
+        if self.qk_rope_head_dim == 0:
+            # The page-strided allocator may retain an empty RoPE view for
+            # the common MLA layout. It owns no storage and is not an input
+            # to the NoPE operator.
+            if len(main_cache) == 2 and main_cache[1].numel() == 0:
+                return (main_cache[0],)
+            if len(main_cache) != 1:
+                raise RuntimeError("NoPE SFA requires one latent KV cache tensor.")
+            # The indexer owns and consumes its own cache. No LightningIndexer
+            # cache layout is imposed on this attention operator.
+            return main_cache
+        if not self.has_indexer:
             return main_cache
 
         # Sparse KV offload registers the main MLA cache as a 6-tuple
@@ -1319,6 +1391,15 @@ class AscendSFAImpl(MLAAttentionImpl):
             # Profiling run.
             return output.fill_(0)
 
+        if self.qk_rope_head_dim == 0:
+            num_tokens = min(hidden_states.shape[0], attn_metadata.slot_mapping.shape[0])
+            if get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL:
+                num_tokens = min(num_tokens, attn_metadata.num_actual_tokens)
+            if num_tokens == 0:
+                return output.zero_()
+            hidden_states = hidden_states[:num_tokens]
+        gate_hidden_states = hidden_states if self.g_proj is not None else None
+
         composed_kv_cache = self._compose_sfa_kv_cache(kv_cache)
         assert composed_kv_cache is not None
         kv_cache = composed_kv_cache
@@ -1329,7 +1410,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         indexer_attn_metadata = self._get_indexer_attn_metadata()
 
         # Inputs and outputs may be padded for CUDA graphs
-        num_input_tokens = attn_metadata.num_input_tokens
+        num_input_tokens = hidden_states.shape[0] if self.qk_rope_head_dim == 0 else attn_metadata.num_input_tokens
         parallel_context = self._get_parallel_forward_context(
             attn_metadata,
             num_input_tokens,
@@ -1414,7 +1495,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
 
             ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
-            q_pe = self.rope_single(q_pe, cos, sin)
+            if self.qk_rope_head_dim:
+                q_pe = self.rope_single(q_pe, cos, sin)
             self._record_query_gather_context(
                 ql_nope,
                 q_pe,
@@ -1492,6 +1574,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         )
 
         attn_output = self._v_up_proj(attn_output)
+        if gate_hidden_states is not None:
+            attn_output.mul_(torch.sigmoid(self.g_proj(gate_hidden_states.contiguous())[0]))
+        if self.qk_rope_head_dim == 0 and attn_output.shape[0] < output.shape[0]:
+            padded = attn_output.new_zeros((output.shape[0], attn_output.shape[1]))
+            padded[: attn_output.shape[0]] = attn_output
+            attn_output = padded
 
         output = self._finalize_o_proj(
             attn_output,
