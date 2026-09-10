@@ -797,6 +797,9 @@ class AscendGlm5NextVisionTransformer(Glm5NextVisionTransformer):
     stacked_params_mapping = (
         ("gate_up_proj.", "gate_proj.", 0),
         ("gate_up_proj.", "up_proj.", 1),
+        ("attn.qkv.", "attn.q.", "q"),
+        ("attn.qkv.", "attn.k.", "k"),
+        ("attn.qkv.", "attn.v.", "v"),
     )
 
     def __init__(
@@ -811,8 +814,11 @@ class AscendGlm5NextVisionTransformer(Glm5NextVisionTransformer):
         # initializer and replacing its blocks would briefly allocate two
         # complete vision towers for the production 24-layer config.
         nn.Module.__init__(self)
-        # text_config remains in the signature for compatibility with the
-        # existing multimodal model construction path.
+        swiglu_limit = vision_config.swiglu_limit
+        if swiglu_limit is None:
+            swiglu_limit = getattr(text_config, "swiglu_limit", None)
+        if swiglu_limit is None:
+            raise ValueError("GLM5Next vision requires swiglu_limit in vision or text config")
         use_data_parallel = is_vit_use_data_parallel()
         self.tp_size = 1 if use_data_parallel else get_tensor_model_parallel_world_size()
 
@@ -835,7 +841,6 @@ class AscendGlm5NextVisionTransformer(Glm5NextVisionTransformer):
             is_neox_style=True,
             rope_parameters={"partial_rotary_factor": 0.5},
         )
-        swiglu_limit = vision_config.swiglu_limit
         attention_bias = vision_config.attention_bias
         self.blocks = nn.ModuleList(
             [
@@ -876,7 +881,7 @@ class AscendGlm5NextVisionTransformer(Glm5NextVisionTransformer):
         )
 
     @classmethod
-    def _map_weight_name(cls, name: str) -> tuple[str, int | None]:
+    def _map_weight_name(cls, name: str) -> tuple[str, int | str | None]:
         for param_name, weight_name, shard_id in cls.stacked_params_mapping:
             if weight_name in name:
                 return name.replace(weight_name, param_name), shard_id
@@ -884,7 +889,7 @@ class AscendGlm5NextVisionTransformer(Glm5NextVisionTransformer):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_shards: set[tuple[str, int | None]] = set()
+        loaded_shards: set[tuple[str, int | str | None]] = set()
         loaded_sources: set[str] = set()
 
         for source_name, loaded_weight in weights:
