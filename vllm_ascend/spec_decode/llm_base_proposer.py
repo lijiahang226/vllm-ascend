@@ -2503,7 +2503,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if device_metadata_provider is not None:
                     device_metadata_tasks.extend(device_metadata_provider.take_device_metadata_tasks())
             else:
-                group_common = self._cache_group_common_metadata(common_attn_metadata, attn_group)
+                group_common = common_attn_metadata
+                if attn_group is not self.draft_attn_groups[0]:
+                    group_common = self._cache_group_common_metadata(common_attn_metadata, attn_group)
                 attn_metadata = builder.build(0, group_common, self.runner.get_model(), **extra_attn_metadata_args)
             if hasattr(attn_metadata, "causal") and not attn_metadata.causal:
                 attn_metadata.attn_mask = None
