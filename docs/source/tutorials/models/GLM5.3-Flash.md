@@ -1,5 +1,19 @@
 # GLM-5.3-Flash
 
+## ModelSlim checkpoints
+
+The ModelSlim adapter follows the `glm-next-0806` quantization recipe. It maps
+text and multimodal checkpoint names to the fused MLA/MLP projections and MoE
+experts. MLA projections use the schemes recorded in `quant_model_description.json`.
+KDA, indexer WK/weights projection, vision, and MLA `kv_b_proj` retain FLOAT weights.
+This does not enable arbitrary quantization of those FLOAT modules.
+
+For MTP checkpoints with `is_rot_used: true`, the draft applies `rot.weight` to
+the previous hidden states before normalization. The target ignores this draft
+weight, and the draft reports a missing rotation weight explicitly.
+Real ModelSlim checkpoint inference and accuracy must be verified separately
+from native block-FP8 checkpoints; native FP8 results do not validate this path.
+
 ## 1 Introduction
 
 [GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash) is the first natively multimodal model in the GLM-5 series. Built on a hybrid architecture that combines sparse and linear attention for the first time in the GLM series, it adopts Manifold-Constrained Hyper-Connections (mHC) and is trained on a 30T-token multimodal pre-training corpus. With 320B total parameters and only 18B active parameters, it outperforms GLM-5.2 across benchmarks and real-world workloads at one-tenth the price, while approaching Claude Opus 4.8 on coding and agentic benchmarks. GLM-5.3-Flash also supports controlling the thinking budget through the `reasoning_effort` parameter (`low`, `high`, `max`).

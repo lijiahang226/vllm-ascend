@@ -471,7 +471,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             )
             prefix = hf_to_vllm_mapper._map_name(prefix)
 
-        if model_type == "glm5_next" and prefix.startswith("model.layers."):
+        if model_type in ("glm5_next", "glm5_next_mtp") and prefix.startswith("model.layers."):
             if not self._has_quant_weight(prefix):
                 candidate = prefix.replace(
                     "model.layers.",
