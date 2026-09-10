@@ -500,7 +500,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             if not self._has_quant_weight(prefix) and self._has_quant_weight(candidate):
                 return candidate
 
-        if model_type == "step3p5_mtp" and prefix.startswith("model.layers."):
+        if model_type in ("step3p5_mtp", "glm5_next_mtp") and prefix.startswith("model.layers."):
             # Step3P5 MTP and newly generated Step3P7 W8A8 MTP checkpoints use
             # ``model.layers.*``.  The Step3P7 vLLM wrapper mapper rewrites
             # current ``model.layers.*`` quant descriptions to

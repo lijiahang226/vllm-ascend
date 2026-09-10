@@ -80,6 +80,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.quantization.configs.modelslim_config import AscendModelSlimConfig
+
 from .attention import Glm5NextMLAAttention
 from .config import Glm5NextConfig
 from .kda import Glm5NextLinearAttention
@@ -89,6 +91,27 @@ from .multimodal import (
     Glm5NextProcessingInfo,
 )
 from .ops.mhc_ops import hc_contract, hc_expand
+
+MTP_ROT_WEIGHT_NAME = "rot.weight"
+GLM5_WEIGHTS_MAPPER = WeightsMapper(
+    orig_to_new_substr={
+        ".self_attn.forget_gate.A_log": ".self_attn.A_log",
+        ".self_attn.forget_gate.dt_bias": ".self_attn.dt_bias",
+        ".self_attn.forget_gate.f_a_proj": ".self_attn.f_a_proj",
+        ".self_attn.forget_gate.f_b_proj": ".self_attn.f_b_proj",
+        ".attn_hc.fn": ".hc_attn_fn",
+        ".attn_hc.base": ".hc_attn_base",
+        ".attn_hc.scale": ".hc_attn_scale",
+        ".ffn_hc.fn": ".hc_ffn_fn",
+        ".ffn_hc.base": ".hc_ffn_base",
+        ".ffn_hc.scale": ".hc_ffn_scale",
+    }
+)
+GLM5_PACKED_MODULES_MAPPING = {
+    "gate_up_proj": ["gate_proj", "up_proj"],
+    "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+}
 
 
 def _mark_zero_initialized_rms_norm_biases(module: nn.Module, loaded_params: set[str]) -> None:
@@ -321,7 +344,9 @@ class Glm5NextDecoderLayer(nn.Module):
                 kv_lora_rank=config.kv_lora_rank,
                 max_position_embeddings=config.max_position_embeddings,
                 cache_config=cache_config,
-                quant_config=None,  # MLA projections are BF16 in checkpoint
+                # Native block-FP8 checkpoints use the existing BF16 loader;
+                # ModelSlim selects each projection's scheme from its description.
+                quant_config=quant_config if isinstance(quant_config, AscendModelSlimConfig) else None,
                 prefix=f"{prefix}.self_attn",
                 topk_indices_buffer=topk_indices_buffer,
                 skip_rope=config.mla_nope,
@@ -760,15 +785,7 @@ class Glm5NextModel(nn.Module):
             ):
                 continue
 
-            # Pad kv_a_proj_with_mqa for NoPE models
-            if kv_a_pad_size > 0 and ".kv_a_proj_with_mqa." in name:
-                pad = torch.zeros(
-                    kv_a_pad_size,
-                    *loaded_weight.shape[1:],
-                    dtype=loaded_weight.dtype,
-                    device=loaded_weight.device,
-                )
-                loaded_weight = torch.cat([loaded_weight, pad], dim=0)
+            loaded_weight = _pad_nope_kv_a_weight(self.config, name, loaded_weight)
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
@@ -838,6 +855,9 @@ class Glm5NextModel(nn.Module):
 
 
 class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid):
+    hf_to_vllm_mapper = GLM5_WEIGHTS_MAPPER
+    packed_modules_mapping = GLM5_PACKED_MODULES_MAPPING
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.model_config = vllm_config.model_config
@@ -910,8 +930,8 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(self, skip_prefixes=[MTP_ROT_WEIGHT_NAME])
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -944,7 +964,12 @@ class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerSt
             ".ffn_hc.base": ".hc_ffn_base",
             ".ffn_hc.scale": ".hc_ffn_scale",
         },
-    )
+    ) | GLM5_WEIGHTS_MAPPER
+    packed_modules_mapping = GLM5_PACKED_MODULES_MAPPING
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self, skip_prefixes=[MTP_ROT_WEIGHT_NAME])
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     # NOTE: weight-prefix mapping is inherited from Glm4vForConditionalGeneration
     # (``model.visual.`` -> ``visual.``, ``model.language_model.`` ->
@@ -1018,9 +1043,24 @@ class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerSt
         return config
 
 
+def _pad_nope_kv_a_weight(config, name: str, weight: torch.Tensor) -> torch.Tensor:
+    # ModelSlim scales and already padded weights must retain their own shapes.
+    if (
+        config.mla_nope
+        and config.qk_rope_head_dim > 0
+        and name.endswith(".kv_a_proj_with_mqa.weight")
+        and weight.ndim == 2
+        and weight.shape[0] == config.kv_lora_rank
+    ):
+        return torch.nn.functional.pad(weight, (0, 0, 0, config.qk_rope_head_dim))
+    return weight
+
+
 def get_spec_layer_idx_from_weight_name(config: Glm5NextConfig, weight_name: str) -> int | None:
     if hasattr(config, "num_nextn_predict_layers") and (config.num_nextn_predict_layers > 0):
         layer_idx = config.num_hidden_layers
+        if weight_name == MTP_ROT_WEIGHT_NAME:
+            return layer_idx
         for i in range(config.num_nextn_predict_layers):
             if weight_name.startswith(f"model.layers.{layer_idx + i}.") or weight_name.startswith(
                 f"layers.{layer_idx + i}."
@@ -1131,7 +1171,8 @@ def _try_load_fp8_attn_proj(
     target_s = f"{layer_prefix}.{target_base}.weight_scale_inv"
     # If the model actually kept this projection in FP8, let the normal path
     # handle it (it has a weight_scale_inv param).
-    if target_s in params_dict:
+    if target_s in params_dict or f"{layer_prefix}.{target_base}.weight_scale" in params_dict:
+        # ModelSlim FP8 uses weight_scale, and must reach its own weight loader.
         return False
 
     entry = buf.setdefault(layer_prefix, {}).setdefault(key, {})
