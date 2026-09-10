@@ -245,10 +245,9 @@ class Glm5NextMoE(nn.Module):
         if self.is_sequence_parallel and not already_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
-        # The router is always external (self.gate); main's MoERunner expects
-        # pre-computed router_logits, so compute them here unconditionally.
-        router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(hidden_states=hidden_states, router_logits=router_logits)
+        # The gate is owned by the MoE runner, which computes routing scores
+        # from hidden states after preparing its communication inputs.
+        final_hidden_states = self.experts(hidden_states=hidden_states, router_logits=hidden_states)
 
         if self.is_sequence_parallel and not already_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(final_hidden_states, 0)
