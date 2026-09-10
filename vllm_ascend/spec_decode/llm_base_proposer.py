@@ -1123,7 +1123,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         **draft_cp_kwargs,
                         attn_group=attn_group,
                     )
-                    for layer_name in self.attn_layer_names:
+                    for layer_name in attn_group.layer_names:
                         per_layer_attn_metadata[layer_name] = attn_metadata
                 multi_steps_attn_metadata.append(per_layer_attn_metadata)
 
