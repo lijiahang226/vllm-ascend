@@ -14,9 +14,18 @@ import vllm_ascend.models.glm5next.multimodal as vision
 @pytest.mark.parametrize("vision_limit,text_limit,expected", [(None, 7, 7), (5, 7, 5), (None, None, None)])
 def test_vision_swiglu_config_fallback(monkeypatch, vision_limit, text_limit, expected):
     config = SimpleNamespace(
-        swiglu_limit=vision_limit, hidden_size=8, num_heads=2, patch_size=2, temporal_patch_size=1,
-        spatial_merge_size=2, out_hidden_size=8, in_channels=3, attention_bias=False,
-        intermediate_size=16, depth=1, projection_intermediate_size=8,
+        swiglu_limit=vision_limit,
+        hidden_size=8,
+        num_heads=2,
+        patch_size=2,
+        temporal_patch_size=1,
+        spatial_merge_size=2,
+        out_hidden_size=8,
+        in_channels=3,
+        attention_bias=False,
+        intermediate_size=16,
+        depth=1,
+        projection_intermediate_size=8,
     )
     monkeypatch.setattr(vision, "is_vit_use_data_parallel", lambda: True)
     for name in ("Glm5NextVisionPatchEmbed", "get_rope", "Conv2dLayer", "get_vit_attn_backend"):
@@ -30,9 +39,7 @@ def test_vision_swiglu_config_fallback(monkeypatch, vision_limit, text_limit, ex
             vision.AscendGlm5NextVisionTransformer(SimpleNamespace(swiglu_limit=text_limit), config)
         block.assert_not_called()
     else:
-        tower = vision.AscendGlm5NextVisionTransformer(
-            SimpleNamespace(swiglu_limit=text_limit), config, norm_eps=1e-6
-        )
+        tower = vision.AscendGlm5NextVisionTransformer(SimpleNamespace(swiglu_limit=text_limit), config, norm_eps=1e-6)
         assert block.call_args.kwargs["swiglu_limit"] == expected
         assert merger.call_args.kwargs["swiglu_limit"] == expected
         assert block.call_args.kwargs["norm_eps"] == 1e-6
@@ -55,8 +62,16 @@ def test_vision_norm_and_clamped_swiglu_bfloat16():
     torch.testing.assert_close(actual, expected)
 
 
-@pytest.mark.parametrize("source,shard", [("attn.q.weight", "q"), ("attn.k.weight", "k"), ("attn.v.weight", "v"),
-                                         ("mlp.gate_proj.weight", 0), ("mlp.up_proj.weight", 1)])
+@pytest.mark.parametrize(
+    "source,shard",
+    [
+        ("attn.q.weight", "q"),
+        ("attn.k.weight", "k"),
+        ("attn.v.weight", "v"),
+        ("mlp.gate_proj.weight", 0),
+        ("mlp.up_proj.weight", 1),
+    ],
+)
 def test_vision_loader_preserves_packed_shards(source, shard):
     tower = vision.AscendGlm5NextVisionTransformer.__new__(vision.AscendGlm5NextVisionTransformer)
     nn.Module.__init__(tower)
