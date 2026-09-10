@@ -418,7 +418,15 @@ def test_determine_batch_execution_and_padding(
         pytest.param(0, [7], [8], [1], CUDAGraphMode.FULL, id="stateful_one_token_handoff"),
         pytest.param(0, [0], [1], [1], CUDAGraphMode.NONE, id="first_token_without_state"),
         pytest.param(7, [16, 24], [8, 8], [8, 8], CUDAGraphMode.FULL, id="steady_spec_decode"),
-        pytest.param(7, [16, 7], [8, 8], [8, 8], CUDAGraphMode.FULL, id="handoff_padded_to_spec_width"),
+        pytest.param(7, [7], [8], [8], CUDAGraphMode.NONE, id="unfinished_spec_width_prefill"),
+        pytest.param(
+            7,
+            [16, 7],
+            [8, 8],
+            [8, 8],
+            CUDAGraphMode.NONE,
+            id="mixed_decode_and_unfinished_spec_width_prefill",
+        ),
         pytest.param(7, [16, 0], [8, 8], [8, 8], CUDAGraphMode.NONE, id="spec_width_prefill_without_state"),
         pytest.param(7, [16, 7], [8, 8], [8, 1], CUDAGraphMode.NONE, id="nonuniform_handoff"),
     ],
@@ -464,6 +472,7 @@ def test_stateful_handoff_preserves_decode_graph(
         lora_config=None,
         model_config=runner.model_config,
     )
+    runner.speculative_config = SimpleNamespace(num_speculative_tokens=num_spec_tokens) if num_spec_tokens > 0 else None
     runner.uniform_decode_query_len = 1 + num_spec_tokens
     runner.input_batch = SimpleNamespace(
         num_computed_tokens_cpu=np.array(computed),
@@ -487,6 +496,8 @@ def test_stateful_handoff_preserves_decode_graph(
     monkeypatch.setattr(f"{module}.should_skip_allreduce_across_dp_group", lambda *args: False)
     monkeypatch.setattr(f"{module}.get_dp_group", lambda: SimpleNamespace(cpu_group=None))
     monkeypatch.setattr(f"{module}.dist.all_reduce", all_reduce)
+    # Keep communication-policy selection outside this dispatcher regression.
+    monkeypatch.setattr(f"{module}.select_moe_comm_method", lambda *args: None)
     num_tokens = sum(scheduled)
     mode, descriptor, _, tokens_across_dp, _ = runner._determine_batch_execution_and_padding(
         num_tokens=num_tokens,
