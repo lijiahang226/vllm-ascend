@@ -12,6 +12,30 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
+### Short convolution in the GLM Next adapter
+
+The GLM Next adapter uses the existing AscendC `npu_causal_conv1d_custom`
+operator for prefill, decode, and MTP verification. Its prefill/decode metadata
+comes from the shared GDN builder. The convolution kernel width must be between
+2 and 4; MTP requires width 4 and enough convolution state for the draft tokens.
+
+The adapter preserves both SD and DS state layouts, including cache pages with
+padding. For non-contiguous views, it stages only the current batch's state rows
+and writes the updated rows back to the original cache. This device-side state
+copy uses Triton; the convolution and SiLU computation use AscendC.
+
+The operator regression covers prefill, decode, MTP accepted-token offsets,
+padded requests, original-cache updates, and graph replay with changed inputs
+and cache indices:
+
+```shell
+pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/test_glm5next_causal_conv1d.py
+```
+
+The regression includes the merged Q/K/V width of 12288 used by the 64-head,
+128-dimensional GLM linear attention under TP2. Run it with the compiled custom
+operators installed on the target NPU before validating the full model.
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
