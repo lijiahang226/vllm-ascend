@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import MambaSpec
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolStateSpec,
     AscendMLAAttentionSpec,
+    requires_padded_page_layout,
 )
 from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_config,
@@ -301,3 +302,40 @@ def test_glm_shared_mla_mamba_pages_preserve_other_block_ids(offset):
         assert torch.count_nonzero(raw.view(plan.num_blocks, page_bytes)[state_id, state_bytes:]) == 0
     assert torch.count_nonzero(backing[:offset]) == 0
     assert torch.count_nonzero(backing[offset + raw.numel() :]) == 0
+
+
+def test_padded_page_layout_detected_for_shared_state_pages():
+    # The pooled layout pads the state caches to the page size of the
+    # block-stride addressed MLA/indexer caches they share physical pages with.
+    # Probe the specs the runner itself derives from the KV cache config.
+    config, _, plan = _make_plan()
+    layer_specs = _make_runner(config)._get_layer_kv_cache_specs(plan)
+    assert requires_padded_page_layout(layer_specs.values())
+
+
+def test_padded_page_layout_rejected_without_state_caches():
+    # A standalone MTP runner has the same attention specs but no recurrent
+    # state caches, so no state view needs the padded page stride.
+    specs = {name: spec for name, spec in _make_specs().items() if not isinstance(spec, MambaSpec)}
+    assert not requires_padded_page_layout(specs.values())
+
+
+def test_padded_page_layout_rejected_for_packed_hybrid_pool():
+    # Other hybrid models pad Mamba pages to the attention page size
+    # (``cache_config.mamba_page_size_padded``) but keep the packed contiguous
+    # state layout, so they must not take the shared padded page path.
+    specs = [
+        AscendMLAAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.bfloat16,
+        ),
+        MambaSpec(
+            block_size=8,
+            shapes=((2, 2), (1, 2, 2)),
+            dtypes=(torch.bfloat16, torch.float32),
+            page_size_padded=64,
+        ),
+    ]
+    assert not requires_padded_page_layout(specs)
