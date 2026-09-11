@@ -26,7 +26,8 @@ def test_get_spec_layer_idx_accepts_checkpoint_prefixes():
     assert get_spec_layer_idx_from_weight_name(config, "model.layers.45.enorm.weight") == 45
     assert get_spec_layer_idx_from_weight_name(config, "layers.46.self_attn.q_a_proj.weight") == 46
     assert get_spec_layer_idx_from_weight_name(config, "model.layers.44.mlp.weight") is None
-    assert get_spec_layer_idx_from_weight_name(config, "rot.weight") is None
+    # ModelSlim routes the shared rotation to the first draft layer.
+    assert get_spec_layer_idx_from_weight_name(config, "rot.weight") == 45
 
 
 def test_mtp_rewrites_layer_and_shared_weight_names():
