@@ -31,7 +31,8 @@ def _copy_conv_state(
     slot = tl.load(cache_indices + request * index_stride).to(tl.int64)
     active = (slot >= 0) & (slot < num_slots) & (tl.load(starts + request + 1) > tl.load(starts + request))
     in_range = offsets < STATE_LEN * DIM
-    cache_offsets = slot * cache_stride + offsets // DIM * STATE_STRIDE + offsets % DIM * DIM_STRIDE
+    safe_slot = tl.where(active, slot, 0)
+    cache_offsets = safe_slot * cache_stride + offsets // DIM * STATE_STRIDE + offsets % DIM * DIM_STRIDE
     packed_offsets = request * STATE_LEN * DIM + offsets
     if WRITE_BACK:
         values = tl.load(packed + packed_offsets, mask=in_range, other=0)

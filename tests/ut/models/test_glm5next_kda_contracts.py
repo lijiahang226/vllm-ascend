@@ -7,6 +7,7 @@ import pytest
 import torch
 
 import vllm_ascend.models.glm5next.ops.kda as kda
+import vllm_ascend.ops.kda as kda_ops
 
 
 @pytest.mark.parametrize("accepted", [None, [1, 2, 1]])
@@ -68,7 +69,7 @@ def test_chunk_uses_host_descriptors_and_preserves_vk_cache(monkeypatch, state_d
         return v, torch.full_like(kwargs["initial_state"], 17)
 
     monkeypatch.setattr(torch.ops._C_ascend, "chunk_kda_fwd", chunk, raising=False)
-    monkeypatch.setattr(kda, "l2norm_fwd", lambda x: x)
+    monkeypatch.setattr(kda_ops, "l2norm_fwd", lambda x: x)
     out = kda.chunk_kda(
         q, q, q, q, torch.zeros(1, 3, 1), state, indices, has_initial, metadata, torch.zeros(1), torch.zeros(128), -4
     )
