@@ -3136,12 +3136,25 @@ class NPUModelRunner(GPUModelRunner):
         num_encoder_reqs: int = 0,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        # A stateful P/D handoff can use a uniform decode graph even at
-        # prompt_len - 1 computed tokens. Keep first-token prefills out.
-        has_initial_state = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
+        # A stateful P/D handoff can use a uniform decode graph once it has
+        # initial state, even at prompt_len - 1 computed tokens. Speculative
+        # decoding requires every row to have completed its prompt: concurrent
+        # partial-prefill rows can otherwise replay a decode graph whose padded
+        # metadata still contains another request's state.
+        has_initial_state = np.all(
+            self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0
+        )
+        is_all_decode = np.all(
+            self.input_batch.num_computed_tokens_cpu[:num_reqs] 
+            >= self.input_batch.num_prompt_tokens[:num_reqs]
+        )
+        has_valid_decode_state = (
+            is_all_decode if self.speculative_config else has_initial_state
+        )
+
         uniform_decode = (
             (
-                has_initial_state
+                has_valid_decode_state
                 and (max_num_scheduled_tokens == self.uniform_decode_query_len)
                 and (num_tokens == max_num_scheduled_tokens * num_reqs)
             )
