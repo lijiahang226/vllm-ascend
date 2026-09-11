@@ -228,17 +228,6 @@ class NPUPlatform(Platform):
         use_compress = getattr(attn_selector_config, "use_compress", False)
         use_mla = attn_selector_config.use_mla
         use_sparse = attn_selector_config.use_sparse
-        if use_mla and use_sparse:
-            from vllm.config import get_current_vllm_config
-            from vllm_ascend.utils import model_uses_kpool_indexer
-
-            if model_uses_kpool_indexer(get_current_vllm_config().model_config):
-                if get_current_hardware_profile().attention_backend_family is AttentionBackendFamily.COMPATIBILITY:
-                    raise NotImplementedError("KPool sparse attention requires Ascend A2, A3 or A5.")
-                if getattr(attn_selector_config, "use_dcp", False) or attn_selector_config.use_pcp:
-                    raise NotImplementedError("KPool attention does not support context parallelism.")
-                # Cache ownership belongs to the indexer; attention uses the
-                # same SFA backend selection as other sparse MLA models.
         key = (use_mla, use_sparse)
         backend_key = (*key, use_compress)
 

@@ -19,7 +19,8 @@ with patch.dict(
         "vllm_ascend.ops.triton.glm5_next_lightning_indexer": MagicMock(),
     },
 ):
-    from vllm_ascend.models.glm5next.indexer import Glm5NextKPoolIndexerBackend
+    import vllm_ascend.attention.indexer_kpool_backend as backend_module
+    from vllm_ascend.attention.indexer_kpool_backend import Glm5NextKPoolIndexerBackend
 
 
 @pytest.mark.parametrize("kpool", [False, True])
@@ -49,12 +50,7 @@ def test_sparse_models_select_shared_sfa(monkeypatch, kpool, fp8_device):
 @pytest.mark.parametrize("mode", ["310p", "pcp", "dcp"])
 def test_kpool_unsupported_routes_fail_explicitly(monkeypatch, mode):
     monkeypatch.setattr(
-        vllm_config_module,
-        "get_current_vllm_config",
-        lambda: SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_kpool=4))),
-    )
-    monkeypatch.setattr(
-        platform,
+        backend_module,
         "get_current_hardware_profile",
         lambda: SimpleNamespace(
             attention_backend_family=AttentionBackendFamily.COMPATIBILITY
@@ -62,9 +58,16 @@ def test_kpool_unsupported_routes_fail_explicitly(monkeypatch, mode):
             else AttentionBackendFamily.STANDARD
         ),
     )
-    selector = SimpleNamespace(use_mla=True, use_sparse=True, use_pcp=mode == "pcp", use_dcp=mode == "dcp")
-    with pytest.raises(NotImplementedError, match="requires Ascend|context parallelism"):
-        platform.NPUPlatform.get_attn_backend_cls(None, selector)
+    source = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=2 if mode == "pcp" else 1,
+                decode_context_parallel_size=2 if mode == "dcp" else 1,
+            )
+        )
+    )
+    with pytest.raises(NotImplementedError, match="requires Ascend|PCP or DCP"):
+        Glm5NextKPoolIndexerBackend(source, qk_rope_head_dim=0)
 
 
 def _indexer():

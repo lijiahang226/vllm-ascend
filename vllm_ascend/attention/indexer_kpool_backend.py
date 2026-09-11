@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Model-side backend for the GLM-Next pooled sparse indexer."""
+"""Attention backend for the GLM-Next pooled sparse indexer."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from vllm_ascend.attention.indexer_kpool import (
     AscendIndexerKPoolMetadata,
     AscendIndexerKPoolStateMetadata,
 )
+from vllm_ascend.device.hardware_profile import AttentionBackendFamily, get_current_hardware_profile
 from vllm_ascend.models.glm5next.sparse_attn_indexer_kpool import (
     SparseAttnIndexerKpool,
 )
@@ -34,6 +35,9 @@ class Glm5NextKPoolIndexerBackend(AscendSFAIndexerBackend):
         parallel_config = vllm_indexer.vllm_config.parallel_config
         if parallel_config.prefill_context_parallel_size > 1 or parallel_config.decode_context_parallel_size > 1:
             raise NotImplementedError("GLM-Next KPool indexing does not support PCP or DCP.")
+
+        if get_current_hardware_profile().attention_backend_family is AttentionBackendFamily.COMPATIBILITY:
+            raise NotImplementedError("KPool sparse attention requires Ascend A2, A3 or A5.")
 
         self.n_head: int = vllm_indexer.n_head
         self.head_dim: int = vllm_indexer.head_dim
