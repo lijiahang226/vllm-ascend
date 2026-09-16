@@ -1,0 +1,4 @@
+[default.extend-words]
+Nd = "Nd" # codespell:ignore nd
+CANN = "CANN"
+cann = "cann"

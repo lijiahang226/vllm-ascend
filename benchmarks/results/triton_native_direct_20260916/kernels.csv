@@ -1,0 +1,5 @@
+case,method,kernel_name,entries,writer_calls,entries_per_call
+t64_pad47616_mixed,triton,_scatter_paged_cache_kernel,32,32,1.0
+t64_pad47616_mixed,scatter_nd_direct,aclnnScatterNdUpdate_ScatterNdUpdateAiCore_ScatterNdUpdate,32,32,1.0
+t4096_pad47616_mixed,triton,_scatter_paged_cache_kernel,32,32,1.0
+t4096_pad47616_mixed,scatter_nd_direct,aclnnScatterNdUpdate_ScatterNdUpdateAiCore_ScatterNdUpdate,32,32,1.0

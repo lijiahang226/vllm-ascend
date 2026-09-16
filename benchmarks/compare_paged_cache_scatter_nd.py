@@ -8,6 +8,8 @@ Use --suite full for boundary/layout/dtype coverage. Each case runs in its own
 process, so a rejected native negative index cannot poison subsequent cases.
 The default small_ops baseline needs no vLLM/Triton installation. Optional
 --baseline triton uses the hash-verified sibling reference and requires both.
+--native-mode direct times the native op with indices/updates prepared outside
+the timed region. Its results do not include integration preprocessing costs.
 """
 
 import argparse
@@ -66,6 +68,32 @@ def scatter_nd(cache, slots, values):
     indices = torch.where(valid[:, None], indices, -1)
     # Whether this CANN version ignores [-1, -1] is tested, never assumed.
     torch_npu.npu_scatter_nd_update_(cache, indices, values.to(cache.dtype))
+
+
+def prepare_native_inputs(inputs):
+    """Build direct-op inputs on CPU outside capture/timing, retaining addresses."""
+    cache = inputs["cache"]
+    slots = inputs["slots"].cpu().long()
+    indices = torch.full((slots.numel(), 2), -1, dtype=torch.int64)
+    valid = (slots >= 0) & (slots < cache.shape[0] * cache.shape[1])
+    indices[valid, 0] = slots[valid] // cache.shape[1]
+    indices[valid, 1] = slots[valid] % cache.shape[1]
+    updates = inputs["values"].cpu().to(cache.dtype).contiguous()
+    for name, value in (("indices", indices), ("updates", updates)):
+        inputs[f"native_{name}_cpu"] = value
+        key = f"native_{name}"
+        if key in inputs:
+            inputs[key].copy_(value)
+        else:
+            inputs[key] = value.to(cache.device)
+
+
+def native_input_difference(inputs):
+    return sum(
+        byte_difference(inputs[f"native_{name}"], inputs[f"native_{name}_cpu"])
+        for name in ("indices", "updates")
+        if f"native_{name}" in inputs
+    )
 
 
 def load_triton_reference():
@@ -244,10 +272,13 @@ def capture(fn, unroll):
     return graph
 
 
-def check_accuracy(case, fn, inputs, mode):
+def check_accuracy(case, fn, inputs, mode, prepare=None):
+    if prepare is not None:
+        prepare(inputs)
     graph = capture(fn, 1) if mode == "graph" and case.tokens else None
     assert byte_difference(inputs["source"], inputs["source_cpu"]) == 0, "Capture mutated source"
     assert byte_difference(inputs["slot_storage"], inputs["slot_cpu"]) == 0, "Capture mutated slots"
+    assert native_input_difference(inputs) == 0, "Capture mutated direct-op inputs"
     records, outputs = [], []
     # Never use a previous output as the next expected cache.
     original_values, original_slots = inputs["values"].cpu(), inputs["slots"].cpu()
@@ -257,6 +288,8 @@ def check_accuracy(case, fn, inputs, mode):
         # both equally would preserve the mapping and could miss stale graphs.
         inputs["slots"].copy_(original_slots.roll(2 * replay, dims=0))
         inputs["backing"].copy_(inputs["initial"])
+        if prepare is not None:
+            prepare(inputs)
         source_before, slots_before = inputs["source"].cpu(), inputs["slot_storage"].cpu()
         expected = reference(inputs)
         graph.replay() if graph else fn()
@@ -264,14 +297,19 @@ def check_accuracy(case, fn, inputs, mode):
         record = accuracy_metrics(actual, expected)
         record["source_changed_bytes"] = byte_difference(inputs["source"], source_before)
         record["slots_changed_bytes"] = byte_difference(inputs["slot_storage"], slots_before)
-        record["pass"] = all(
-            record[key] == 0 for key in ("different_bytes", "source_changed_bytes", "slots_changed_bytes")
+        if prepare is not None:
+            record["native_inputs_changed_bytes"] = native_input_difference(inputs)
+        record["pass"] = (
+            all(record[key] == 0 for key in ("different_bytes", "source_changed_bytes", "slots_changed_bytes"))
+            and record.get("native_inputs_changed_bytes", 0) == 0
         )
         records.append(record)
         outputs.append(actual)
     inputs["values"].copy_(original_values)
     inputs["slots"].copy_(original_slots)
     inputs["backing"].copy_(inputs["initial"])
+    if prepare is not None:
+        prepare(inputs)
     return {"pass": all(record["pass"] for record in records), "replays": records}, outputs
 
 
@@ -327,7 +365,13 @@ def run_worker(args):
     methods = (args.baseline, "scatter_nd")
     case = next(case for case in all_cases() if case.name == args.worker)
     path = args.output / f"{case.name}.json"
-    result = {"case": asdict(case), "status": "running", "accuracy": {}, "performance": {}}
+    result = {
+        "case": asdict(case),
+        "native_mode": args.native_mode,
+        "status": "running",
+        "accuracy": {},
+        "performance": {},
+    }
     save(path, result)
     try:
         torch.npu.set_device(args.device)
@@ -344,13 +388,31 @@ def run_worker(args):
             partial(writer, data["cache"], data["slots"], data["values"])
             for writer, data in zip((baseline, scatter_nd), inputs)
         ]
+        preparations = (None, None)
+        if args.native_mode == "direct":
+            prepare_native_inputs(inputs[1])
+            result["native_inputs"] = {
+                name: {
+                    "shape": list(inputs[1][f"native_{name}"].shape),
+                    "stride": list(inputs[1][f"native_{name}"].stride()),
+                    "dtype": str(inputs[1][f"native_{name}"].dtype),
+                }
+                for name in ("indices", "updates")
+            }
+            functions[1] = partial(
+                torch_npu.npu_scatter_nd_update_,
+                inputs[1]["cache"],
+                inputs[1]["native_indices"],
+                inputs[1]["native_updates"],
+            )
+            preparations = (None, prepare_native_inputs)
         for mode in args.modes:
             outputs = []
             result["accuracy"][mode] = {}
-            for name, fn, data in zip(methods, functions, inputs):
+            for name, fn, data, prepare in zip(methods, functions, inputs, preparations):
                 result["stage"] = f"{mode}/{name}/accuracy"
                 save(path, result)
-                record, actual = check_accuracy(case, fn, data, mode)
+                record, actual = check_accuracy(case, fn, data, mode, prepare=prepare)
                 result["accuracy"][mode][name] = record
                 outputs.append(actual)
                 save(path, result)
@@ -366,6 +428,7 @@ def run_worker(args):
                     assert byte_difference(data["backing"], reference(data)) == 0, "Timed calls wrote wrong cache"
                     assert byte_difference(data["source"], data["source_cpu"]) == 0, "Timed calls mutated source"
                     assert byte_difference(data["slot_storage"], data["slot_cpu"]) == 0, "Timed calls mutated slots"
+                    assert native_input_difference(data) == 0, "Timed calls mutated direct-op inputs"
                 result["performance"][mode] = performance
             else:
                 result["performance"][mode] = {"skipped": "accuracy failed, empty/special case, or --accuracy-only"}
@@ -387,6 +450,8 @@ def write_summary(output, records, args):
         output / "results.json",
         {
             "baseline": args.baseline,
+            "native_mode": args.native_mode,
+            "native_preprocessing_timed": args.native_mode == "full",
             "baseline_commit": BASELINE_COMMIT if args.baseline == "small_ops" else None,
             "triton_reference_sha256": TRITON_REFERENCE_SHA256 if args.baseline == "triton" else None,
             "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
@@ -397,6 +462,7 @@ def write_summary(output, records, args):
     fields = (
         "case",
         "mode",
+        "native_mode",
         "status",
         f"{args.baseline}_bytes",
         "scatter_nd_bytes",
@@ -414,7 +480,12 @@ def write_summary(output, records, args):
         for record in records:
             for mode in args.modes:
                 accuracy = record.get("accuracy", {}).get(mode, {})
-                row = {"case": record["case"]["name"], "mode": mode, "status": record["status"]}
+                row = {
+                    "case": record["case"]["name"],
+                    "mode": mode,
+                    "native_mode": args.native_mode,
+                    "status": record["status"],
+                }
                 for name in (args.baseline, "scatter_nd"):
                     replays = accuracy.get(name, {}).get("replays", [])
                     row[f"{name}_bytes"] = max((r["different_bytes"] for r in replays), default="")
@@ -459,6 +530,8 @@ def run_parent(args):
             str(args.unroll),
             "--baseline",
             args.baseline,
+            "--native-mode",
+            args.native_mode,
             "--modes",
             *args.modes,
         ]
@@ -481,7 +554,7 @@ def run_parent(args):
         for mode, row in record.get("performance", {}).items():
             if "speedup" in row:
                 print(
-                    f"  {mode} ({args.baseline} -> scatter_nd): "
+                    f"  {mode} ({args.baseline} -> scatter_nd/{args.native_mode}): "
                     f"{row[f'{args.baseline}_us']:.3f} -> {row['scatter_nd_us']:.3f} us; "
                     f"{row['change_percent']:+.2f}%; {row['speedup']:.3f}x",
                     flush=True,
@@ -497,6 +570,12 @@ def parse_args():
     )
     parser.add_argument("--suite", choices=("smoke", "full"), default="smoke")
     parser.add_argument("--baseline", choices=("small_ops", "triton"), default="small_ops")
+    parser.add_argument(
+        "--native-mode",
+        choices=("full", "direct"),
+        default="full",
+        help="full includes preprocessing; direct calls the native op with prepared indices/updates",
+    )
     parser.add_argument("--case", nargs="+", help="Run exact names from --suite full --list-cases")
     parser.add_argument("--list-cases", action="store_true")
     parser.add_argument("--modes", nargs="+", choices=("eager", "graph"), default=["eager", "graph"])

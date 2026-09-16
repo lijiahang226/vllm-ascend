@@ -1,0 +1,764 @@
+[
+  {
+    "case": "t64_pad47616_mixed",
+    "mode": "graph",
+    "accuracy": {
+      "source_view": {
+        "pass": true,
+        "replays": [
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "native_inputs_changed_bytes": 0,
+            "pass": true
+          },
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "native_inputs_changed_bytes": 0,
+            "pass": true
+          },
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "native_inputs_changed_bytes": 0,
+            "pass": true
+          },
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "native_inputs_changed_bytes": 0,
+            "pass": true
+          }
+        ]
+      },
+      "packed": {
+        "pass": true,
+        "replays": [
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "native_inputs_changed_bytes": 0,
+            "pass": true
+          },
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "native_inputs_changed_bytes": 0,
+            "pass": true
+          },
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "native_inputs_changed_bytes": 0,
+            "pass": true
+          },
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "native_inputs_changed_bytes": 0,
+            "pass": true
+          }
+        ]
+      }
+    },
+    "updates": {
+      "source_view": {
+        "shape": [
+          64,
+          1,
+          512
+        ],
+        "stride": [
+          512,
+          512,
+          1
+        ],
+        "storage_offset": 7
+      },
+      "packed": {
+        "shape": [
+          64,
+          1,
+          512
+        ],
+        "stride": [
+          512,
+          512,
+          1
+        ],
+        "storage_offset": 0
+      }
+    },
+    "performance": {
+      "source_view_us": 14.880077913403511,
+      "scatter_nd_us": 15.122187323868275,
+      "speedup": 0.9839897889584646,
+      "change_percent": 1.6270708518715482,
+      "source_view_wall_us": 15.159550457610749,
+      "scatter_nd_wall_us": 15.401423297589645,
+      "faster_pairs": 0,
+      "pairs": 15,
+      "unroll": 32,
+      "samples": {
+        "source_view": [
+          {
+            "event_us": 14.847422018647194,
+            "wall_us": 15.754660125821829
+          },
+          {
+            "event_us": 14.884921722114086,
+            "wall_us": 15.164081560214981
+          },
+          {
+            "event_us": 14.897968620061874,
+            "wall_us": 15.232753867167048
+          },
+          {
+            "event_us": 14.910468831658363,
+            "wall_us": 15.189867553999647
+          },
+          {
+            "event_us": 14.897733926773071,
+            "wall_us": 15.180683476501144
+          },
+          {
+            "event_us": 14.866874553263187,
+            "wall_us": 15.154788343352266
+          },
+          {
+            "event_us": 14.890546910464764,
+            "wall_us": 15.159550457610749
+          },
+          {
+            "event_us": 14.880077913403511,
+            "wall_us": 15.155956134549342
+          },
+          {
+            "event_us": 14.868437312543392,
+            "wall_us": 15.130841347854584
+          },
+          {
+            "event_us": 14.874843880534172,
+            "wall_us": 15.15474468760658
+          },
+          {
+            "event_us": 14.912343584001064,
+            "wall_us": 15.17892633273732
+          },
+          {
+            "event_us": 14.872031286358833,
+            "wall_us": 15.14392533863429
+          },
+          {
+            "event_us": 14.841250143945217,
+            "wall_us": 15.146621080930345
+          },
+          {
+            "event_us": 14.888905920088291,
+            "wall_us": 15.161034752964042
+          },
+          {
+            "event_us": 14.873359352350235,
+            "wall_us": 15.149824321269989
+          }
+        ],
+        "scatter_nd": [
+          {
+            "event_us": 15.128125436604023,
+            "wall_us": 15.459430869668722
+          },
+          {
+            "event_us": 15.131250023841858,
+            "wall_us": 15.43134385428857
+          },
+          {
+            "event_us": 15.085937455296516,
+            "wall_us": 15.366187653853558
+          },
+          {
+            "event_us": 15.122187323868275,
+            "wall_us": 15.401423297589645
+          },
+          {
+            "event_us": 15.134297311306,
+            "wall_us": 15.430796338478103
+          },
+          {
+            "event_us": 15.10484330356121,
+            "wall_us": 15.51681270939298
+          },
+          {
+            "event_us": 15.14085941016674,
+            "wall_us": 15.418843759107403
+          },
+          {
+            "event_us": 15.146562829613686,
+            "wall_us": 15.524152331636287
+          },
+          {
+            "event_us": 15.122187323868275,
+            "wall_us": 15.379941032733768
+          },
+          {
+            "event_us": 15.108671970665455,
+            "wall_us": 15.38489777885843
+          },
+          {
+            "event_us": 15.116406604647636,
+            "wall_us": 15.392753994092345
+          },
+          {
+            "event_us": 15.123828314244747,
+            "wall_us": 15.411813365062699
+          },
+          {
+            "event_us": 15.07179718464613,
+            "wall_us": 15.340254321927205
+          },
+          {
+            "event_us": 15.102734789252281,
+            "wall_us": 15.384863218059763
+          },
+          {
+            "event_us": 15.109140425920486,
+            "wall_us": 15.389234249596484
+          }
+        ]
+      }
+    },
+    "note": "Both sides directly call the native op; scatter_nd_us is the packed-updates side."
+  },
+  {
+    "case": "t4096_pad47616_mixed",
+    "mode": "graph",
+    "accuracy": {
+      "source_view": {
+        "pass": true,
+        "replays": [
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "native_inputs_changed_bytes": 0,
+            "pass": true
+          },
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "native_inputs_changed_bytes": 0,
+            "pass": true
+          },
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "native_inputs_changed_bytes": 0,
+            "pass": true
+          },
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "native_inputs_changed_bytes": 0,
+            "pass": true
+          }
+        ]
+      },
+      "packed": {
+        "pass": true,
+        "replays": [
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "native_inputs_changed_bytes": 0,
+            "pass": true
+          },
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "native_inputs_changed_bytes": 0,
+            "pass": true
+          },
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "native_inputs_changed_bytes": 0,
+            "pass": true
+          },
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "native_inputs_changed_bytes": 0,
+            "pass": true
+          }
+        ]
+      }
+    },
+    "updates": {
+      "source_view": {
+        "shape": [
+          4096,
+          1,
+          512
+        ],
+        "stride": [
+          512,
+          512,
+          1
+        ],
+        "storage_offset": 7
+      },
+      "packed": {
+        "shape": [
+          4096,
+          1,
+          512
+        ],
+        "stride": [
+          512,
+          512,
+          1
+        ],
+        "storage_offset": 0
+      }
+    },
+    "performance": {
+      "source_view_us": 33.72179716825485,
+      "scatter_nd_us": 29.950235038995743,
+      "speedup": 1.125927630429226,
+      "change_percent": -11.184344981499372,
+      "source_view_wall_us": 34.04044946364593,
+      "scatter_nd_wall_us": 30.27172169822734,
+      "faster_pairs": 15,
+      "pairs": 15,
+      "unroll": 32,
+      "samples": {
+        "source_view": [
+          {
+            "event_us": 33.73859450221062,
+            "wall_us": 34.201069865957834
+          },
+          {
+            "event_us": 33.73789042234421,
+            "wall_us": 34.11552279430907
+          },
+          {
+            "event_us": 33.729374408721924,
+            "wall_us": 34.0540809702361
+          },
+          {
+            "event_us": 33.74132886528969,
+            "wall_us": 34.030445021926425
+          },
+          {
+            "event_us": 33.70695188641548,
+            "wall_us": 34.043843697872944
+          },
+          {
+            "event_us": 33.69242325425148,
+            "wall_us": 34.0370479534613
+          },
+          {
+            "event_us": 33.73804688453674,
+            "wall_us": 34.02837501198519
+          },
+          {
+            "event_us": 33.733829855918884,
+            "wall_us": 34.05627103347797
+          },
+          {
+            "event_us": 33.72179716825485,
+            "wall_us": 34.04044946364593
+          },
+          {
+            "event_us": 33.7105467915535,
+            "wall_us": 34.02134825591929
+          },
+          {
+            "event_us": 33.72226655483246,
+            "wall_us": 34.080958357662894
+          },
+          {
+            "event_us": 33.70999917387962,
+            "wall_us": 34.17841253394727
+          },
+          {
+            "event_us": 33.69211032986641,
+            "wall_us": 34.00193418201525
+          },
+          {
+            "event_us": 33.695001155138016,
+            "wall_us": 34.00162131583784
+          },
+          {
+            "event_us": 33.709920942783356,
+            "wall_us": 34.034590498777106
+          }
+        ],
+        "scatter_nd": [
+          {
+            "event_us": 29.950624331831932,
+            "wall_us": 30.28066385013517
+          },
+          {
+            "event_us": 29.950235038995743,
+            "wall_us": 30.2458993246546
+          },
+          {
+            "event_us": 30.023671686649323,
+            "wall_us": 30.3736323985504
+          },
+          {
+            "event_us": 29.954921454191208,
+            "wall_us": 30.27355887752492
+          },
+          {
+            "event_us": 29.926875606179237,
+            "wall_us": 30.2663665934233
+          },
+          {
+            "event_us": 29.94554676115513,
+            "wall_us": 30.257811886258423
+          },
+          {
+            "event_us": 29.998905956745148,
+            "wall_us": 30.320234145619906
+          },
+          {
+            "event_us": 29.98742274940014,
+            "wall_us": 30.312583476188593
+          },
+          {
+            "event_us": 29.939375817775726,
+            "wall_us": 30.243871151469648
+          },
+          {
+            "event_us": 29.9482811242342,
+            "wall_us": 30.2873486361932
+          },
+          {
+            "event_us": 29.995780438184738,
+            "wall_us": 30.297738703666255
+          },
+          {
+            "event_us": 29.92960996925831,
+            "wall_us": 30.230394258978777
+          },
+          {
+            "event_us": 29.936952516436577,
+            "wall_us": 30.25016121682711
+          },
+          {
+            "event_us": 29.954921454191208,
+            "wall_us": 30.27172169822734
+          },
+          {
+            "event_us": 29.93929758667946,
+            "wall_us": 30.251527277869172
+          }
+        ]
+      }
+    },
+    "note": "Both sides directly call the native op; scatter_nd_us is the packed-updates side."
+  },
+  {
+    "case": "t4096_projection_slice",
+    "mode": "graph",
+    "accuracy": {
+      "source_view": {
+        "pass": true,
+        "replays": [
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "native_inputs_changed_bytes": 0,
+            "pass": true
+          },
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "native_inputs_changed_bytes": 0,
+            "pass": true
+          },
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "native_inputs_changed_bytes": 0,
+            "pass": true
+          },
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "native_inputs_changed_bytes": 0,
+            "pass": true
+          }
+        ]
+      },
+      "packed": {
+        "pass": true,
+        "replays": [
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "native_inputs_changed_bytes": 0,
+            "pass": true
+          },
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "native_inputs_changed_bytes": 0,
+            "pass": true
+          },
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "native_inputs_changed_bytes": 0,
+            "pass": true
+          },
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "native_inputs_changed_bytes": 0,
+            "pass": true
+          }
+        ]
+      }
+    },
+    "updates": {
+      "source_view": {
+        "shape": [
+          4096,
+          1,
+          512
+        ],
+        "stride": [
+          1024,
+          512,
+          1
+        ],
+        "storage_offset": 7
+      },
+      "packed": {
+        "shape": [
+          4096,
+          1,
+          512
+        ],
+        "stride": [
+          512,
+          512,
+          1
+        ],
+        "storage_offset": 0
+      }
+    },
+    "performance": {
+      "source_view_us": 45.854296535253525,
+      "scatter_nd_us": 36.58929839730263,
+      "speedup": 1.2532160643625219,
+      "change_percent": -20.205299913014297,
+      "source_view_wall_us": 46.20149593392853,
+      "scatter_nd_wall_us": 36.92211612360552,
+      "faster_pairs": 15,
+      "pairs": 15,
+      "unroll": 32,
+      "samples": {
+        "source_view": [
+          {
+            "event_us": 45.903123915195465,
+            "wall_us": 46.3813357782783
+          },
+          {
+            "event_us": 45.84156349301338,
+            "wall_us": 46.16954356606584
+          },
+          {
+            "event_us": 45.85421830415726,
+            "wall_us": 46.21458356268704
+          },
+          {
+            "event_us": 45.86421698331833,
+            "wall_us": 46.201843360904604
+          },
+          {
+            "event_us": 45.838672667741776,
+            "wall_us": 46.163913793861866
+          },
+          {
+            "event_us": 45.8623431622982,
+            "wall_us": 46.175793613656424
+          },
+          {
+            "event_us": 45.89312523603439,
+            "wall_us": 46.23645691026468
+          },
+          {
+            "event_us": 45.86656391620636,
+            "wall_us": 46.182160076568834
+          },
+          {
+            "event_us": 45.851875096559525,
+            "wall_us": 46.2364168924978
+          },
+          {
+            "event_us": 45.8647646009922,
+            "wall_us": 46.20149593392853
+          },
+          {
+            "event_us": 45.84718868136406,
+            "wall_us": 46.20497384166811
+          },
+          {
+            "event_us": 45.854296535253525,
+            "wall_us": 46.18278398993425
+          },
+          {
+            "event_us": 45.85093632340431,
+            "wall_us": 46.19954233930912
+          },
+          {
+            "event_us": 45.87492346763611,
+            "wall_us": 46.2157931906404
+          },
+          {
+            "event_us": 45.85367068648338,
+            "wall_us": 46.190285502234474
+          }
+        ],
+        "scatter_nd": [
+          {
+            "event_us": 36.559298634529114,
+            "wall_us": 36.930983696947806
+          },
+          {
+            "event_us": 36.60726547241211,
+            "wall_us": 36.941648431820795
+          },
+          {
+            "event_us": 36.57476603984833,
+            "wall_us": 36.927469409420155
+          },
+          {
+            "event_us": 36.61679849028587,
+            "wall_us": 36.94840597745497
+          },
+          {
+            "event_us": 36.56367212533951,
+            "wall_us": 36.87641401484143
+          },
+          {
+            "event_us": 36.592189222574234,
+            "wall_us": 36.92086647788528
+          },
+          {
+            "event_us": 36.55453026294708,
+            "wall_us": 36.88176548166666
+          },
+          {
+            "event_us": 36.6164855659008,
+            "wall_us": 36.98000728036277
+          },
+          {
+            "event_us": 36.56398504972458,
+            "wall_us": 36.897234167554416
+          },
+          {
+            "event_us": 36.58390790224075,
+            "wall_us": 36.91981146403123
+          },
+          {
+            "event_us": 36.58929839730263,
+            "wall_us": 37.062820410938
+          },
+          {
+            "event_us": 36.594610661268234,
+            "wall_us": 36.92211612360552
+          },
+          {
+            "event_us": 36.58296912908554,
+            "wall_us": 36.91188612719998
+          },
+          {
+            "event_us": 36.60210967063904,
+            "wall_us": 36.964383980375715
+          },
+          {
+            "event_us": 36.5920327603817,
+            "wall_us": 36.91364508995321
+          }
+        ]
+      }
+    },
+    "note": "Both sides directly call the native op; scatter_nd_us is the packed-updates side."
+  }
+]

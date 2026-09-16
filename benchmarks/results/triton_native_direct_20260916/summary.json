@@ -1,0 +1,101 @@
+{
+  "case_status": {
+    "pass": 38,
+    "error": 1
+  },
+  "modes": {
+    "eager": {
+      "measured_cases": 33,
+      "native_faster_case_medians": 33,
+      "triton_faster_case_medians": 0,
+      "native_speedup_range": [
+        1.2003185683490183,
+        5.405701292631809
+      ],
+      "triton_speedup_range": [
+        0.18498987381397503,
+        0.8331121640277989
+      ],
+      "native_faster_pairs": 494,
+      "pairs": 495,
+      "accuracy": {
+        "triton": {
+          "cases_checked": 39,
+          "all_passed": true,
+          "max_different_bytes": 0,
+          "max_abs_finite": 0.0,
+          "max_native_inputs_changed_bytes": 0,
+          "nonempty_replays": 38
+        },
+        "scatter_nd": {
+          "cases_checked": 38,
+          "all_passed": true,
+          "max_different_bytes": 0,
+          "max_abs_finite": 0.0,
+          "max_native_inputs_changed_bytes": 0,
+          "nonempty_replays": 37
+        }
+      }
+    },
+    "graph": {
+      "measured_cases": 33,
+      "native_faster_case_medians": 1,
+      "triton_faster_case_medians": 32,
+      "native_speedup_range": [
+        0.4346713576110641,
+        1.0037483107910592
+      ],
+      "triton_speedup_range": [
+        0.9962656865762443,
+        2.300588668864585
+      ],
+      "native_faster_pairs": 14,
+      "pairs": 495,
+      "accuracy": {
+        "triton": {
+          "cases_checked": 38,
+          "all_passed": true,
+          "max_different_bytes": 0,
+          "max_abs_finite": 0.0,
+          "max_native_inputs_changed_bytes": 0,
+          "nonempty_replays": 148
+        },
+        "scatter_nd": {
+          "cases_checked": 38,
+          "all_passed": true,
+          "max_different_bytes": 0,
+          "max_abs_finite": 0.0,
+          "max_native_inputs_changed_bytes": 0,
+          "nonempty_replays": 148
+        }
+      }
+    }
+  },
+  "load": {
+    "peer_physical_device": 9,
+    "samples": 198,
+    "active_samples": 0
+  },
+  "profiles": [
+    {
+      "case": "t64_pad47616_mixed",
+      "method": "triton",
+      "entries_per_call": 1.0
+    },
+    {
+      "case": "t64_pad47616_mixed",
+      "method": "scatter_nd_direct",
+      "entries_per_call": 1.0
+    },
+    {
+      "case": "t4096_pad47616_mixed",
+      "method": "triton",
+      "entries_per_call": 1.0
+    },
+    {
+      "case": "t4096_pad47616_mixed",
+      "method": "scatter_nd_direct",
+      "entries_per_call": 1.0
+    }
+  ]
+}

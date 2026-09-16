@@ -8,6 +8,10 @@ PyTorch、torch-npu 和对应 CANN 的机器即可运行，不依赖 vLLM、Trit
 该模式还需要同目录的 `paged_cache_triton_reference.py`，以及 vLLM、vllm-ascend、
 Triton-Ascend 环境。脚本校验参考文件的固定 SHA256，防止误测其他 Triton 版本。
 
+若要只测原生算子本身，增加 `--native-mode direct`。计时和图捕获中的原生调用直接是
+`torch_npu.npu_scatter_nd_update_(cache, indices, updates)`，不经过 `scatter_nd` 包装函数。
+默认 `--native-mode full` 保留此前完整路径口径。
+
 ## 比较对象
 
 | 名称 | 实际执行内容 |
@@ -21,8 +25,9 @@ Triton-Ascend 环境。脚本校验参考文件的固定 SHA256，防止误测�
 并包含原调用侧的 slots/values 类型转换。原版存在精度问题时照实报告，不为跑分修改基线。
 
 这里“融合算子”指用原生 scatter 替换写入部分；Python 生成坐标的操作仍然存在。
-**计时包括两侧完整函数，不把索引生成、mask 或 dtype 转换移到计时外。**
-未运行 profiler 前，不声称整段只有一个设备任务。
+**full 模式计时包括两侧完整函数，不把索引生成、mask 或 dtype 转换移到计时外。**
+direct 模式在 CPU 上生成索引、整理 updates 并拷贝到设备，全部发生在计时与捕获之外。
+它测量“调用方已经提供原生接口所需入参”时的性能，不包含整条接入路径的准备成本。
 
 ## 运行
 
@@ -49,6 +54,9 @@ python compare_paged_cache_scatter_nd.py --suite full --list-cases
 
 # 同一批输入上直接比较 Triton 与原生 scatter；默认原生路径仍包含完整前处理。
 python compare_paged_cache_scatter_nd.py --device 0 --baseline triton --suite full --output triton_native_results
+
+# 原生侧只执行 npu_scatter_nd_update_，不计任何准备操作。
+python compare_paged_cache_scatter_nd.py --device 0 --baseline triton --native-mode direct --suite full --output triton_native_direct_results
 ```
 
 ## 精度检查
@@ -68,6 +76,13 @@ python compare_paged_cache_scatter_nd.py --device 0 --baseline triton --suite fu
 主要标准是 **差异字节数为 0**。`max_abs_finite` 只辅助定位，不能替代逐字节标准：
 例如负零变正零，绝对误差仍为 0，但字节已经不一致。
 脚本同时给出两侧各自对 CPU 的误差，以及两侧直接对比的误差，避免“两边都写错但相互一致”。
+
+direct 模式的原生 indices 为 `[T,2]` int64，updates 为 `[T,H,D]`、与 cache 相同 dtype，
+无效坐标为 `[-1,-1]`。每次图精度重放前，根据变化后的 slots/values 更新这两块设备缓冲，
+保持地址不变，准备操作不进入捕获。另检查 indices 和 updates 未被原生算子修改。
+空输入也直接传给原生算子，不用 Python 提前返回来代替验证。
+FP32→BF16 case 中，原生 updates 已提前转成 BF16；Triton 仍在 kernel 内转换，
+因此这个 direct case 的两侧计时范围不同，需结合该前提解读。
 
 原生版本是否忽略 `[-1,-1]`、是否正确原地写入非连续 cache，由当前机器实测决定。
 报错或写错均为失败，不会自动换成其他实现。每个 case 使用独立子进程，
@@ -98,6 +113,7 @@ eager 的 Event 间隔可能包含主机提交不及时导致的设备空隙，�
 | `change_percent` | `(scatter_nd_us / small_ops_us - 1) × 100%`，负数表示耗时下降 |
 | `speedup` | `small_ops_us / scatter_nd_us`，大于 1 表示原生路径更快 |
 | `faster_pairs` / `pairs` | 原生路径更快的配对轮数 / 总轮数，用来观察波动 |
+| `native_mode` | `full` 包含前处理；`direct` 使用预先准备的索引和 updates |
 
 测量期间请避免其他任务使用同一张卡；脚本不保证设备独占。
 
@@ -106,6 +122,9 @@ eager 的 Event 间隔可能包含主机提交不及时导致的设备空隙，�
 小于 1 表示原生更慢，倒数是 Triton 相对原生的加速比。`faster_pairs` 仍统计原生更快的轮数。
 
 ## 当前验证状态
+
+直接调用原生接口、不计前处理的结果见 [direct 模式报告](results/triton_native_direct_20260916/README.md)。
+它与下面 full 模式的计时边界不同，报告分别列出 eager 与 graph，不能混用倍率。
 
 **Triton 与原生的同卡直接 A/B 已完成，见 [Triton 对比报告](results/triton_native_20260916/README.md)。**
 33 个性能 case 中，Triton graph 快 1.97×～8.62×；双方共同可执行的 38 个 case 均逐字节一致。
