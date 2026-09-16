@@ -21,6 +21,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolStateSpec,
     get_kv_cache_compression_ratio,
@@ -433,8 +434,11 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         if not isinstance(state_metadata, AscendIndexerKPoolStateMetadata):
             raise TypeError("GLM KPool backend requires compressor-state metadata.")
 
+        # MRV2 captures FULL graphs with runtime mode NONE. The capture
+        # must cover future sequence lengths, not the dummy's short prefix.
+        full_graph = context.cudagraph_runtime_mode == CUDAGraphMode.FULL or _EXTRA_CTX.capturing
         num_tokens = hidden_states.shape[0]
-        if context.cudagraph_runtime_mode != CUDAGraphMode.FULL:
+        if not full_graph:
             num_tokens = min(num_tokens, indexer_metadata.num_actual_tokens)
         hidden = hidden_states[:num_tokens]
         k_hidden = k_hidden_states[:num_tokens]
@@ -482,7 +486,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             index_kpool=self.index_kpool,
             max_pool_seq_len=(
                 indexer_metadata.block_table.shape[1] * indexer_cache.shape[1]
-                if context.cudagraph_runtime_mode == CUDAGraphMode.FULL or indexer_metadata.seq_lens_cpu is None
+                if full_graph or indexer_metadata.seq_lens_cpu is None
                 else int(indexer_metadata.seq_lens_cpu.max())
                 if indexer_metadata.seq_lens_cpu.numel()
                 else 0
