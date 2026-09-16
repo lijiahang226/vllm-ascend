@@ -913,6 +913,7 @@ class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerSt
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
+            "rot.": None,
             "lm_head.": "language_model.lm_head.",
             "model.language_model.": "language_model.model.",
             "model.visual.": "visual.",
@@ -1001,7 +1002,7 @@ class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerSt
     def load_weights(self, weights: Iterable[tuple[Any, ...]]) -> set[str]:
         # The visual merger's down_proj already contains the exported rotation.
         # Ignore the standalone QuaRot tensor to avoid applying it a second time.
-        loader = AutoWeightsLoader(self, skip_prefixes=["rot."])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_encoder_cudagraph_config(self):

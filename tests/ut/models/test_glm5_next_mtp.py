@@ -4,6 +4,7 @@
 from types import SimpleNamespace
 from typing import get_args
 
+import torch
 import vllm.config.speculative as speculative_config
 
 from vllm_ascend.models.glm5next.config import Glm5NextTextConfig
@@ -64,6 +65,25 @@ def test_multimodal_mapper_flattens_modelslim_forget_gate_prefix():
         Glm5NextForConditionalGeneration.hf_to_vllm_mapper._map_name("model.language_model.layers.1.ffn_hc.scale")
         == "language_model.model.layers.1.hc_ffn_scale"
     )
+
+
+def test_multimodal_loader_skips_exported_rotation():
+    model = Glm5NextForConditionalGeneration.__new__(Glm5NextForConditionalGeneration)
+    torch.nn.Module.__init__(model)
+    model.visual = torch.nn.Linear(1, 1, bias=False)
+    model.rot = torch.nn.Linear(1, 1, bias=False)
+    model.rot.weight.data.zero_()
+
+    loaded = model.load_weights(
+        [
+            ("rot.weight", torch.ones(1, 1)),
+            ("model.visual.weight", torch.full((1, 1), 2.0)),
+        ]
+    )
+
+    assert loaded == {"visual.weight"}
+    assert model.visual.weight.item() == 2.0
+    assert model.rot.weight.item() == 0.0
 
 
 def test_glm5_speculative_config_selects_mtp_architecture():
