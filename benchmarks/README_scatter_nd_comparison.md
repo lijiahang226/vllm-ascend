@@ -95,6 +95,11 @@ eager 的 Event 间隔可能包含主机提交不及时导致的设备空隙，�
 
 ## 当前验证状态
 
+**NPU 验证已完成，见 [完整实测报告](results/scatter_nd_20260916/README.md)。**
+33 个有效性能 case 的图模式加速比为 2.00×～4.42×；
+原生路径 38 个可执行 case 均逐字节通过，但输出 cache 的 feature stride=2 报错。
+因此不能无条件完整替换。旧组合另有 3 个 NaN 编码/负零的严格精度失败 case。
+
 2026-09-16：本地脚本语法、Ruff 和格式检查通过；确认 39 个完整 case、4 个快速 case，
 命令行参数校验正常。AST 对比确认小算子算法与已保存的 PR 基线一致。
 模拟本机缺少 torch 的真实启动失败，确认失败退出码、日志和空性能字段能正确保留。
@@ -102,5 +107,4 @@ eager 的 Event 间隔可能包含主机提交不及时导致的设备空隙，�
 提交文件的 Ruff、格式、codespell、typos 和 Markdown 检查通过。
 全仓 `format.sh ci` 已执行，但 Windows 环境缺少 `/bin/bash` 或 `shellcheck`，
 导致 Gitleaks、logger 和 shellcheck 三个检查未能通过；不宣称全仓检查通过。
-当前验证环境没有 torch/NPU，尚未完成设备验证。
-**本文件交付的是可运行用例，目前没有该对比的 NPU 精度或性能实测结果。**
+上述静态检查在无 torch/NPU 的本机完成；远端设备的测量数据、失败信息和共享环境限制见实测报告。

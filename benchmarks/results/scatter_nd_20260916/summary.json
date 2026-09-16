@@ -1,0 +1,54 @@
+{
+  "cases": 39,
+  "statuses": {
+    "pass": 35,
+    "error": 1,
+    "accuracy_failed": 3
+  },
+  "accuracy": {
+    "eager": {
+      "small_ops": {
+        "tested": 39,
+        "passed": 36,
+        "replays": 39
+      },
+      "scatter_nd": {
+        "tested": 38,
+        "passed": 38,
+        "replays": 38
+      }
+    },
+    "graph": {
+      "small_ops": {
+        "tested": 38,
+        "passed": 35,
+        "replays": 152
+      },
+      "scatter_nd": {
+        "tested": 38,
+        "passed": 38,
+        "replays": 152
+      }
+    }
+  },
+  "eager": {
+    "measured": 33,
+    "regressions": 0,
+    "speedup_range": [
+      1.832975222600323,
+      4.070542270722876
+    ]
+  },
+  "graph": {
+    "measured": 33,
+    "regressions": 0,
+    "speedup_range": [
+      1.999832696450566,
+      4.419716744140184
+    ]
+  },
+  "load": {
+    "samples": 120,
+    "peer_active_samples": []
+  }
+}

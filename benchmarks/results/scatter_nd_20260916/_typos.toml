@@ -1,0 +1,5 @@
+[default.extend-words]
+# Preserve the CANN operator names in measured output.
+Nd = "Nd"
+CANN = "CANN"
+cann = "cann"

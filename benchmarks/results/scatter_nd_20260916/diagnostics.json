@@ -1,0 +1,288 @@
+{
+  "bits": [
+    {
+      "case": "bits_bfloat16_zero0",
+      "method": "small_ops",
+      "different_elements": 128,
+      "zero_sign_changes": 0,
+      "nan_encoding_changes": 128,
+      "finite_value_changes": 0,
+      "other_changes": 0,
+      "first_mismatches": [
+        {
+          "backing_element": 3095,
+          "expected": "0x7fc1",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 3096,
+          "expected": "0x7f81",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600468,
+          "expected": "0x7f81",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600469,
+          "expected": "0x7f82",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600470,
+          "expected": "0x7f83",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600471,
+          "expected": "0x7f84",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600472,
+          "expected": "0x7f85",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600473,
+          "expected": "0x7f86",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600474,
+          "expected": "0x7f87",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600475,
+          "expected": "0x7f88",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600476,
+          "expected": "0x7f89",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600477,
+          "expected": "0x7f8a",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600478,
+          "expected": "0x7f8b",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600479,
+          "expected": "0x7f8c",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600480,
+          "expected": "0x7f8d",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600481,
+          "expected": "0x7f8e",
+          "actual": "0x7fff"
+        }
+      ]
+    },
+    {
+      "case": "bits_bfloat16_zero0",
+      "method": "scatter_nd",
+      "different_elements": 0,
+      "zero_sign_changes": 0,
+      "nan_encoding_changes": 0,
+      "finite_value_changes": 0,
+      "other_changes": 0,
+      "first_mismatches": []
+    },
+    {
+      "case": "bits_bfloat16_zero1",
+      "method": "small_ops",
+      "different_elements": 129,
+      "zero_sign_changes": 1,
+      "nan_encoding_changes": 128,
+      "finite_value_changes": 0,
+      "other_changes": 0,
+      "first_mismatches": [
+        {
+          "backing_element": 20,
+          "expected": "0x8000",
+          "actual": "0x0"
+        },
+        {
+          "backing_element": 23,
+          "expected": "0x7fc1",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 24,
+          "expected": "0x7f81",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600468,
+          "expected": "0x7f81",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600469,
+          "expected": "0x7f82",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600470,
+          "expected": "0x7f83",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600471,
+          "expected": "0x7f84",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600472,
+          "expected": "0x7f85",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600473,
+          "expected": "0x7f86",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600474,
+          "expected": "0x7f87",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600475,
+          "expected": "0x7f88",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600476,
+          "expected": "0x7f89",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600477,
+          "expected": "0x7f8a",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600478,
+          "expected": "0x7f8b",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600479,
+          "expected": "0x7f8c",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 600480,
+          "expected": "0x7f8d",
+          "actual": "0x7fff"
+        }
+      ]
+    },
+    {
+      "case": "bits_bfloat16_zero1",
+      "method": "scatter_nd",
+      "different_elements": 0,
+      "zero_sign_changes": 0,
+      "nan_encoding_changes": 0,
+      "finite_value_changes": 0,
+      "other_changes": 0,
+      "first_mismatches": []
+    },
+    {
+      "case": "bits_float16_zero0",
+      "method": "small_ops",
+      "different_elements": 0,
+      "zero_sign_changes": 0,
+      "nan_encoding_changes": 0,
+      "finite_value_changes": 0,
+      "other_changes": 0,
+      "first_mismatches": []
+    },
+    {
+      "case": "bits_float16_zero0",
+      "method": "scatter_nd",
+      "different_elements": 0,
+      "zero_sign_changes": 0,
+      "nan_encoding_changes": 0,
+      "finite_value_changes": 0,
+      "other_changes": 0,
+      "first_mismatches": []
+    },
+    {
+      "case": "bits_float16_zero1",
+      "method": "small_ops",
+      "different_elements": 3,
+      "zero_sign_changes": 1,
+      "nan_encoding_changes": 2,
+      "finite_value_changes": 0,
+      "other_changes": 0,
+      "first_mismatches": [
+        {
+          "backing_element": 20,
+          "expected": "0x8000",
+          "actual": "0x0"
+        },
+        {
+          "backing_element": 23,
+          "expected": "0x7e01",
+          "actual": "0x7fff"
+        },
+        {
+          "backing_element": 24,
+          "expected": "0x7c01",
+          "actual": "0x7fff"
+        }
+      ]
+    },
+    {
+      "case": "bits_float16_zero1",
+      "method": "scatter_nd",
+      "different_elements": 0,
+      "zero_sign_changes": 0,
+      "nan_encoding_changes": 0,
+      "finite_value_changes": 0,
+      "other_changes": 0,
+      "first_mismatches": []
+    }
+  ],
+  "layout": [
+    {
+      "cache_feature_stride": 1,
+      "source_feature_stride": 2,
+      "contiguous_source": false,
+      "different_bytes": 0
+    },
+    {
+      "cache_feature_stride": 2,
+      "source_feature_stride": 1,
+      "contiguous_source": false,
+      "error": "aclnnScatterNdUpdate: 561103 / AclNN_Parameter_Error(EZ1001): Output tensor should not from workspace."
+    },
+    {
+      "cache_feature_stride": 2,
+      "source_feature_stride": 2,
+      "contiguous_source": false,
+      "error": "aclnnScatterNdUpdate: 561103 / AclNN_Parameter_Error(EZ1001): Output tensor should not from workspace."
+    },
+    {
+      "cache_feature_stride": 2,
+      "source_feature_stride": 2,
+      "contiguous_source": true,
+      "error": "aclnnScatterNdUpdate: 561103 / AclNN_Parameter_Error(EZ1001): Output tensor should not from workspace."
+    }
+  ]
+}
