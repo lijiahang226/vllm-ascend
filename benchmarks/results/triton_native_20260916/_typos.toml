@@ -1,5 +1,4 @@
 [default.extend-words]
-# Preserve the CANN operator names in measured output.
 Nd = "Nd" # codespell:ignore nd
 CANN = "CANN"
 cann = "cann"

@@ -1,0 +1,186 @@
+{
+  "case": "t4096_feature_stride2",
+  "triton_reference_sha256": "69dbe58d37c84dcf5d95285a41dba282c1c3fb526f98f88944e9f64c7ff57c1b",
+  "modes": {
+    "eager": {
+      "accuracy": {
+        "pass": true,
+        "replays": [
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "pass": true
+          }
+        ]
+      },
+      "triton_us": 2444.1025257110596,
+      "samples": [
+        {
+          "event_us": 2481.447458267212,
+          "wall_us": 2673.0704121291637
+        },
+        {
+          "event_us": 2440.035104751587,
+          "wall_us": 2454.127767123282
+        },
+        {
+          "event_us": 2446.194887161255,
+          "wall_us": 2464.3437936902046
+        },
+        {
+          "event_us": 2439.1050338745117,
+          "wall_us": 2483.224729076028
+        },
+        {
+          "event_us": 2448.5650062561035,
+          "wall_us": 2464.2276111990213
+        },
+        {
+          "event_us": 2443.612575531006,
+          "wall_us": 2457.008871715516
+        },
+        {
+          "event_us": 2437.0899200439453,
+          "wall_us": 2449.9641149304807
+        },
+        {
+          "event_us": 2446.9549655914307,
+          "wall_us": 2460.8776438981295
+        },
+        {
+          "event_us": 2445.3125,
+          "wall_us": 2458.1290199421346
+        },
+        {
+          "event_us": 2447.5300312042236,
+          "wall_us": 2460.388990584761
+        },
+        {
+          "event_us": 2440.0925636291504,
+          "wall_us": 2452.3891042917967
+        },
+        {
+          "event_us": 2447.2100734710693,
+          "wall_us": 2464.746357873082
+        },
+        {
+          "event_us": 2442.8799152374268,
+          "wall_us": 2455.27399238199
+        },
+        {
+          "event_us": 2444.1025257110596,
+          "wall_us": 2456.3114857301116
+        },
+        {
+          "event_us": 2435.4100227355957,
+          "wall_us": 2509.1656134463847
+        }
+      ]
+    },
+    "graph": {
+      "accuracy": {
+        "pass": true,
+        "replays": [
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "pass": true
+          },
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "pass": true
+          },
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "pass": true
+          },
+          {
+            "different_bytes": 0,
+            "max_abs_finite": 0.0,
+            "nonfinite_mask_differences": 0,
+            "source_changed_bytes": 0,
+            "slots_changed_bytes": 0,
+            "pass": true
+          }
+        ]
+      },
+      "triton_us": 2433.9497089385986,
+      "samples": [
+        {
+          "event_us": 2433.889150619507,
+          "wall_us": 2435.0893199880375
+        },
+        {
+          "event_us": 2434.112071990967,
+          "wall_us": 2435.3672815777827
+        },
+        {
+          "event_us": 2433.748960494995,
+          "wall_us": 2435.0981093448354
+        },
+        {
+          "event_us": 2434.5312118530273,
+          "wall_us": 2435.624819554505
+        },
+        {
+          "event_us": 2432.8904151916504,
+          "wall_us": 2434.1381631529657
+        },
+        {
+          "event_us": 2434.6964359283447,
+          "wall_us": 2435.9811013709987
+        },
+        {
+          "event_us": 2434.6630573272705,
+          "wall_us": 2436.0979350603884
+        },
+        {
+          "event_us": 2433.7282180786133,
+          "wall_us": 2435.145996059873
+        },
+        {
+          "event_us": 2434.816837310791,
+          "wall_us": 2435.918484479771
+        },
+        {
+          "event_us": 2434.22269821167,
+          "wall_us": 2435.5349414690863
+        },
+        {
+          "event_us": 2433.5286617279053,
+          "wall_us": 2434.8708102479577
+        },
+        {
+          "event_us": 2435.065746307373,
+          "wall_us": 2436.150320136221
+        },
+        {
+          "event_us": 2433.6109161376953,
+          "wall_us": 2434.766705846414
+        },
+        {
+          "event_us": 2433.9497089385986,
+          "wall_us": 2435.1199845114024
+        },
+        {
+          "event_us": 2433.1865310668945,
+          "wall_us": 2434.2517190234503
+        }
+      ]
+    }
+  }
+}

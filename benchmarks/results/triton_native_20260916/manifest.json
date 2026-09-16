@@ -1,0 +1,17 @@
+{
+  "tested_script_sha256": "83cfbecca5c6bfe2facc344f0a028030954030ab9008ddffb0ce83781cbdf737",
+  "triton_reference_sha256": "69dbe58d37c84dcf5d95285a41dba282c1c3fb526f98f88944e9f64c7ff57c1b",
+  "executed_supplement_sha256": "51f9e625fb2cc7c01573c144abb9844fb9042b4029948780cf35df1854763175",
+  "supplement_note": "Published helper adds license comments and formatting; executable AST is identical to the executed supplement.",
+  "raw_evidence_archive_sha256": "98b08203789b0159001d17b6a0871f5bbccdf75051191dee8c44164b9bb7efcf",
+  "files": {
+    "_typos.toml": "4d40a65196331d53dc83defeca67b26d15185afdaee20337bbfbd9757d1bc64d",
+    "default_regression.json": "cee65bc83f4f11839303d2457e3ca617d4ba4826f5aec79a18a0d7b5e965af24",
+    "kernels.csv": "c35bc5b55fc4091017149ddc160cd256a8c990aa924f7a2ec421d49dcbdea8d7",
+    "README.md": "0a7db74942f14ea34eed4bda5ac7e7675a6bec49b65722b0d6802d51f6841ffe",
+    "results.json": "0aa28986b6accd70e8649c53f6f04f210eca2d0732b9868d131860382d0ab611",
+    "summary.csv": "3afa771432e81a51e199a3abe875132e33e0a497b6ab49bca9b88a9d134503bc",
+    "summary.json": "a72da959cf8d2bc857a76d6206d24ed48000845ba3244a2962b191178463e8b8",
+    "triton_stride.json": "17a4caeb1398c62d026fa60f6717f98e962bd88730366749573fe8639e709889"
+  }
+}

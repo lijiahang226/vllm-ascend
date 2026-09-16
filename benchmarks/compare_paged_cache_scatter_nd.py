@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Standalone small-ops vs native scatter comparison; no vLLM/Triton dependency.
+"""Paged-cache baselines vs native scatter with complete preprocessing costs.
 
 python compare_paged_cache_scatter_nd.py --suite smoke --device 0 --output results
 Use --suite full for boundary/layout/dtype coverage. Each case runs in its own
 process, so a rejected native negative index cannot poison subsequent cases.
+The default small_ops baseline needs no vLLM/Triton installation. Optional
+--baseline triton uses the hash-verified sibling reference and requires both.
 """
 
 import argparse
 import csv
 import hashlib
+import importlib.util
 import json
 import subprocess
 import sys
@@ -22,6 +25,7 @@ from pathlib import Path
 from statistics import median
 
 BASELINE_COMMIT = "517e0e5b8969e44077ad96d81e66f9bf76aa3f0f"
+TRITON_REFERENCE_SHA256 = "69dbe58d37c84dcf5d95285a41dba282c1c3fb526f98f88944e9f64c7ff57c1b"
 METHODS = ("small_ops", "scatter_nd")
 REPLAYS = 4
 
@@ -62,6 +66,20 @@ def scatter_nd(cache, slots, values):
     indices = torch.where(valid[:, None], indices, -1)
     # Whether this CANN version ignores [-1, -1] is tested, never assumed.
     torch_npu.npu_scatter_nd_update_(cache, indices, values.to(cache.dtype))
+
+
+def load_triton_reference():
+    # Lazy initialization stays inside the isolated NPU worker, before timing.
+    from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+
+    source = Path(__file__).with_name("paged_cache_triton_reference.py")
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == TRITON_REFERENCE_SHA256
+    init_device_properties_triton()
+    spec = importlib.util.spec_from_file_location("paged_cache_triton_reference", source)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.scatter_paged_cache
 
 
 @dataclass(frozen=True)
@@ -288,16 +306,16 @@ def benchmark(functions, mode, args):
     if old <= 0 or new <= 0:
         raise RuntimeError("Timer resolution too low; increase --iterations/--unroll")
     return {
-        "small_ops_us": old,
+        f"{args.baseline}_us": old,
         "scatter_nd_us": new,
         "speedup": old / new,
         "change_percent": (new / old - 1) * 100,
-        "small_ops_wall_us": wall[0],
+        f"{args.baseline}_wall_us": wall[0],
         "scatter_nd_wall_us": wall[1],
         "faster_pairs": sum(b["event_us"] < a["event_us"] for a, b in zip(*samples)),
         "pairs": args.repeats,
         "unroll": unroll,
-        "samples": dict(zip(METHODS, samples)),
+        "samples": dict(zip((args.baseline, "scatter_nd"), samples)),
     }
 
 
@@ -306,6 +324,7 @@ def save(path, result):
 
 
 def run_worker(args):
+    methods = (args.baseline, "scatter_nd")
     case = next(case for case in all_cases() if case.name == args.worker)
     path = args.output / f"{case.name}.json"
     result = {"case": asdict(case), "status": "running", "accuracy": {}, "performance": {}}
@@ -317,15 +336,18 @@ def run_worker(args):
             "torch": torch.__version__,
             "torch_npu": torch_npu.__version__,
         }
-        inputs = [make_inputs(case, f"npu:{args.device}") for _ in METHODS]
+        baseline = load_triton_reference() if args.baseline == "triton" else small_ops
+        if args.baseline == "triton":
+            result["runtime"]["triton_reference_sha256"] = TRITON_REFERENCE_SHA256
+        inputs = [make_inputs(case, f"npu:{args.device}") for _ in methods]
         functions = [
             partial(writer, data["cache"], data["slots"], data["values"])
-            for writer, data in zip((small_ops, scatter_nd), inputs)
+            for writer, data in zip((baseline, scatter_nd), inputs)
         ]
         for mode in args.modes:
             outputs = []
             result["accuracy"][mode] = {}
-            for name, fn, data in zip(METHODS, functions, inputs):
+            for name, fn, data in zip(methods, functions, inputs):
                 result["stage"] = f"{mode}/{name}/accuracy"
                 save(path, result)
                 record, actual = check_accuracy(case, fn, data, mode)
@@ -333,7 +355,7 @@ def run_worker(args):
                 outputs.append(actual)
                 save(path, result)
             result["accuracy"][mode]["pair_different_bytes"] = [byte_difference(a, b) for a, b in zip(*outputs)]
-            passed = all(result["accuracy"][mode][name]["pass"] for name in METHODS)
+            passed = all(result["accuracy"][mode][name]["pass"] for name in methods)
             if passed and case.tokens and not case.special and not args.accuracy_only:
                 result["stage"] = f"{mode}/performance"
                 save(path, result)
@@ -350,7 +372,7 @@ def run_worker(args):
             save(path, result)
         result["status"] = (
             "pass"
-            if all(mode[name]["pass"] for mode in result["accuracy"].values() for name in METHODS)
+            if all(mode[name]["pass"] for mode in result["accuracy"].values() for name in methods)
             else "accuracy_failed"
         )
     except Exception:
@@ -364,7 +386,9 @@ def write_summary(output, records, args):
     save(
         output / "results.json",
         {
-            "baseline_commit": BASELINE_COMMIT,
+            "baseline": args.baseline,
+            "baseline_commit": BASELINE_COMMIT if args.baseline == "small_ops" else None,
+            "triton_reference_sha256": TRITON_REFERENCE_SHA256 if args.baseline == "triton" else None,
             "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             "timing": {"iterations": args.iterations, "repeats": args.repeats, "unroll": args.unroll},
             "results": records,
@@ -374,10 +398,10 @@ def write_summary(output, records, args):
         "case",
         "mode",
         "status",
-        "small_ops_bytes",
+        f"{args.baseline}_bytes",
         "scatter_nd_bytes",
         "pair_bytes",
-        "small_ops_us",
+        f"{args.baseline}_us",
         "scatter_nd_us",
         "change_percent",
         "speedup",
@@ -391,7 +415,7 @@ def write_summary(output, records, args):
             for mode in args.modes:
                 accuracy = record.get("accuracy", {}).get(mode, {})
                 row = {"case": record["case"]["name"], "mode": mode, "status": record["status"]}
-                for name in METHODS:
+                for name in (args.baseline, "scatter_nd"):
                     replays = accuracy.get(name, {}).get("replays", [])
                     row[f"{name}_bytes"] = max((r["different_bytes"] for r in replays), default="")
                 row["pair_bytes"] = max(accuracy.get("pair_different_bytes", []), default="")
@@ -433,6 +457,8 @@ def run_parent(args):
             str(args.repeats),
             "--unroll",
             str(args.unroll),
+            "--baseline",
+            args.baseline,
             "--modes",
             *args.modes,
         ]
@@ -455,7 +481,8 @@ def run_parent(args):
         for mode, row in record.get("performance", {}).items():
             if "speedup" in row:
                 print(
-                    f"  {mode}: {row['small_ops_us']:.3f} -> {row['scatter_nd_us']:.3f} us; "
+                    f"  {mode} ({args.baseline} -> scatter_nd): "
+                    f"{row[f'{args.baseline}_us']:.3f} -> {row['scatter_nd_us']:.3f} us; "
                     f"{row['change_percent']:+.2f}%; {row['speedup']:.3f}x",
                     flush=True,
                 )
@@ -469,6 +496,7 @@ def parse_args():
         "--device", type=int, default=0, help="Logical device after ASCEND_RT_VISIBLE_DEVICES filtering"
     )
     parser.add_argument("--suite", choices=("smoke", "full"), default="smoke")
+    parser.add_argument("--baseline", choices=("small_ops", "triton"), default="small_ops")
     parser.add_argument("--case", nargs="+", help="Run exact names from --suite full --list-cases")
     parser.add_argument("--list-cases", action="store_true")
     parser.add_argument("--modes", nargs="+", choices=("eager", "graph"), default=["eager", "graph"])

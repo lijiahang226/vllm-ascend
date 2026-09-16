@@ -1,0 +1,109 @@
+{
+  "cases": 39,
+  "statuses": {
+    "pass": 38,
+    "error": 1
+  },
+  "accuracy": {
+    "eager": {
+      "triton": {
+        "tested": 39,
+        "passed": 39,
+        "replays": 39
+      },
+      "scatter_nd": {
+        "tested": 38,
+        "passed": 38,
+        "replays": 38
+      }
+    },
+    "graph": {
+      "triton": {
+        "tested": 38,
+        "passed": 38,
+        "replays": 152
+      },
+      "scatter_nd": {
+        "tested": 38,
+        "passed": 38,
+        "replays": 152
+      }
+    }
+  },
+  "eager": {
+    "measured": 33,
+    "triton_speedup_range": [
+      1.706729748199962,
+      2.550670040505528
+    ],
+    "triton_latency_reduction_percent_range": [
+      41.408415652526664,
+      60.79461537087698
+    ],
+    "triton_faster_pairs": 494,
+    "pairs": 495
+  },
+  "graph": {
+    "measured": 33,
+    "triton_speedup_range": [
+      1.965175825911306,
+      8.623440847128494
+    ],
+    "triton_latency_reduction_percent_range": [
+      49.11396798114629,
+      88.40370082282192
+    ],
+    "triton_faster_pairs": 495,
+    "pairs": 495
+  },
+  "load": {
+    "samples": 193,
+    "peer_active_samples": []
+  },
+  "graph_capture_accuracy_including_supplement": {
+    "triton": {
+      "nonempty_cases": 38,
+      "changed_input_replays": 152,
+      "all_passed": true
+    },
+    "scatter_nd": {
+      "nonempty_cases": 37,
+      "changed_input_replays": 148,
+      "all_passed": true
+    },
+    "empty_case": "Both pass, without graph capture; four ordinary no-op checks are listed under graph in raw results."
+  },
+  "eager_outlier": {
+    "case": "t64_two_heads",
+    "pair_index_zero_based": 9,
+    "triton_us": 295.25500535964966,
+    "scatter_nd_us": 106.77500069141388,
+    "note": "Retained in raw samples. Cause was not established; case medians still favor Triton."
+  },
+  "profiles": [
+    {
+      "case": "t64_pad47616_mixed",
+      "method": "triton",
+      "writer_calls": 32,
+      "visible_kernel_entries_per_call": 1.0
+    },
+    {
+      "case": "t64_pad47616_mixed",
+      "method": "scatter_nd",
+      "writer_calls": 32,
+      "visible_kernel_entries_per_call": 12.0
+    },
+    {
+      "case": "t4096_pad47616_mixed",
+      "method": "triton",
+      "writer_calls": 32,
+      "visible_kernel_entries_per_call": 1.0
+    },
+    {
+      "case": "t4096_pad47616_mixed",
+      "method": "scatter_nd",
+      "writer_calls": 32,
+      "visible_kernel_entries_per_call": 12.0
+    }
+  ]
+}

@@ -4,12 +4,17 @@
 PyTorch、torch-npu 和对应 CANN 的机器即可运行，不依赖 vLLM、Triton 或以前的测试目录。
 只测试写 cache 算子，不启动模型，不添加 nightly 用例。
 
+另外支持 `--baseline triton`，直接对比上一轮验证过的 Triton writer 与原生完整路径。
+该模式还需要同目录的 `paged_cache_triton_reference.py`，以及 vLLM、vllm-ascend、
+Triton-Ascend 环境。脚本校验参考文件的固定 SHA256，防止误测其他 Triton 版本。
+
 ## 比较对象
 
 | 名称 | 实际执行内容 |
 | --- | --- |
 | `small_ops` | PR #16252 的原版组合：valid/where、div/remainder、保存 slot 0、where/sum/any、高级索引写入、恢复 slot 0 |
 | `scatter_nd` | slots 转 int64、valid/where、生成二维坐标、无效坐标转 `[-1,-1]`、updates 类型转换、`torch_npu.npu_scatter_nd_update_` |
+| `triton`（可选基线） | 冻结的优化版 writer，在一个 kernel 内完成合法性判断、按 stride 寻址、转换与写入 |
 
 原版来自提交 `517e0e5b8969e44077ad96d81e66f9bf76aa3f0f` 的
 `vllm_ascend/attention/utils.py::scatter_paged_cache`，保留其 slot 0 归约逻辑，
@@ -41,6 +46,9 @@ python compare_paged_cache_scatter_nd.py --device 0 --case t4096_pad47616_mixed 
 
 # 列出全部场景及形状参数；此命令不需要安装 torch。
 python compare_paged_cache_scatter_nd.py --suite full --list-cases
+
+# 同一批输入上直接比较 Triton 与原生 scatter；默认原生路径仍包含完整前处理。
+python compare_paged_cache_scatter_nd.py --device 0 --baseline triton --suite full --output triton_native_results
 ```
 
 ## 精度检查
@@ -93,7 +101,16 @@ eager 的 Event 间隔可能包含主机提交不及时导致的设备空隙，�
 
 测量期间请避免其他任务使用同一张卡；脚本不保证设备独占。
 
+使用 `--baseline triton` 时，CSV 中对应列为 `triton_bytes` 和 `triton_us`。
+`change_percent` 表示原生相对 Triton 的耗时变化；`speedup=triton_us/scatter_nd_us`，
+小于 1 表示原生更慢，倒数是 Triton 相对原生的加速比。`faster_pairs` 仍统计原生更快的轮数。
+
 ## 当前验证状态
+
+**Triton 与原生的同卡直接 A/B 已完成，见 [Triton 对比报告](results/triton_native_20260916/README.md)。**
+33 个性能 case 中，Triton graph 快 1.97×～8.62×；双方共同可执行的 38 个 case 均逐字节一致。
+原生在 cache feature stride=2 时失败，Triton 该布局精度通过但性能较差。
+维度和此前 Flash 部署的 block 已核对；合成 slot、padding 和 T 矩阵不等于真实调用回放。
 
 **NPU 验证已完成，见 [完整实测报告](results/scatter_nd_20260916/README.md)。**
 33 个有效性能 case 的图模式加速比为 2.00×～4.42×；
