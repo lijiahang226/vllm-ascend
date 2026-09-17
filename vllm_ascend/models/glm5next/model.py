@@ -733,7 +733,7 @@ class Glm5NextModel(nn.Module):
             ):
                 continue
 
-            # FP8 checkpoint: dequantize BF16-kept MLA projections
+            # FP8/MXFP8 checkpoint: dequantize BF16-kept MLA projections
             # (q_a_proj / kv_a_proj_with_mqa / o_proj) to BF16.
             if _try_load_fp8_attn_proj(
                 name,
@@ -818,6 +818,7 @@ class Glm5NextModel(nn.Module):
                     weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     weight_loader(param, loaded_weight, **kwargs)
             loaded_params.add(name)
+        _raise_if_unpaired_fp8_weights(_pending_wk_fp8)
         return loaded_params
 
 
@@ -1079,8 +1080,8 @@ def _dequant_fp8_block(
     return out[:out_dim, :in_dim].contiguous()
 
 
-# FP8 checkpoint projections that the MODEL keeps in BF16, so the block-FP8
-# (weight + weight_scale_inv) must be dequantized to BF16 on load.
+# FP8 checkpoint projections that the MODEL keeps in BF16, so the quantized
+# weight must be dequantized to BF16 on load.
 # Maps checkpoint proj-suffix -> (buffer key, model target base, fused shard id
 # or None for a direct projection, whether NoPE rope-padding applies).
 _FP8_ATTN_PROJS = {
@@ -1090,6 +1091,43 @@ _FP8_ATTN_PROJS = {
     ".o_proj.": ("o_proj", "o_proj", None, False),
 }
 
+# Weight-scale key conventions the BF16 dequant path understands:
+# * native HF FP8 checkpoints store ``<proj>.weight_scale_inv`` (one float32
+#   scale per 128x128 block),
+# * ModelSlim W8A8_MXFP8 checkpoints store ``<proj>.weight_scale`` (one uint8
+#   E8M0 exponent per ``group_size`` input columns; the GLM-5.3-Flash export
+#   uses ``group_size = 32``).
+_BLOCK_FP8_SCALE_SUFFIX = ".weight_scale_inv"
+_MXFP8_SCALE_SUFFIX = ".weight_scale"
+_MXFP8_GROUP_SIZE = 32
+
+
+def _dequant_mxfp8_block(
+    weight_fp8: torch.Tensor,
+    scale: torch.Tensor,
+    group_size: int = _MXFP8_GROUP_SIZE,
+) -> torch.Tensor:
+    """Dequantize an MXFP8 (e4m3 + E8M0 per-group scale) weight to BF16.
+
+    ``scale`` holds one E8M0 exponent per group of input columns; ModelSlim
+    exports those exponents as ``uint8`` (the runtime kernel reads the same bytes
+    as ``float8_e8m0fnu``). Power-of-two scales make the decode exact, so
+    ``2 ** (exponent - 127)`` broadcast over the group is enough. A trailing
+    partial group keeps its own scale and is trimmed back to ``in_dim``.
+    """
+    out_dim, in_dim = weight_fp8.shape
+    if scale.shape[1] != -(-in_dim // group_size):
+        # Unknown grouping: recover it from the shape, since the scale count
+        # spans the input dim in whole groups.
+        group_size = in_dim // scale.shape[1]
+    if scale.dtype in (torch.uint8, torch.int8):
+        scale_f32 = torch.pow(2.0, scale.to(torch.float32) - 127.0)
+    else:
+        scale_f32 = scale.to(torch.float32)
+    scale_full = scale_f32.repeat_interleave(group_size, dim=1)[:, :in_dim]
+    out = (weight_fp8.to(torch.float32) * scale_full).to(torch.bfloat16)
+    return out[:out_dim, :in_dim].contiguous()
+
 
 def _try_load_fp8_attn_proj(
     name,
@@ -1097,16 +1135,17 @@ def _try_load_fp8_attn_proj(
     buf,
     params_dict,
     loaded_params,
-    kv_a_pad_size: int,
+    kv_a_pad_size,
 ) -> bool:
-    """Dequantize FP8 q_a_proj / kv_a_proj_with_mqa / o_proj to BF16 on load.
+    """Dequantize FP8 q_a_proj / kv_a_proj_with_mqa / q_b_proj / o_proj to BF16.
 
-    The FP8 checkpoint stores these as block-FP8 (weight + weight_scale_inv),
-    but the model holds them in BF16 (``fused_qkv_a_proj`` is always BF16 via
-    DeepSeekV2FusedQkvAProjLinear; ``o_proj`` is excluded by
-    modules_to_not_convert). When the model target is BF16 (no
-    ``weight_scale_inv`` param) we dequantize; otherwise we return False so the
-    normal stacked/direct path loads the FP8 tensor as-is.
+    The model holds these projections in BF16 (``fused_qkv_a_proj`` is always
+    BF16 via DeepSeekV2FusedQkvAProjLinear; ``o_proj`` is excluded by
+    modules_to_not_convert), while a checkpoint may ship them as native block-FP8
+    (``weight`` + ``weight_scale_inv``) or as ModelSlim MXFP8 (``weight`` +
+    ``weight_scale``). When the model target carries no scale parameter we
+    dequantize the pair to BF16; otherwise we return False so the normal
+    stacked/direct path loads the quantized tensor as-is.
     """
     matched = None
     for suffix, info in _FP8_ATTN_PROJS.items():
@@ -1117,27 +1156,41 @@ def _try_load_fp8_attn_proj(
         return False
     suffix, (key, target_base, shard_id, is_kva) = matched
     is_weight = name.endswith(".weight") and tensor.dtype == torch.float8_e4m3fn
-    is_scale = "weight_scale_inv" in name
-    if not is_weight and not is_scale:
+    scale_suffix = next(
+        (candidate for candidate in (_BLOCK_FP8_SCALE_SUFFIX, _MXFP8_SCALE_SUFFIX) if name.endswith(candidate)),
+        None,
+    )
+    if not is_weight and scale_suffix is None:
         return False
 
     layer_prefix = name.rsplit(suffix, 1)[0]
     target_w = f"{layer_prefix}.{target_base}.weight"
-    target_s = f"{layer_prefix}.{target_base}.weight_scale_inv"
-    # If the model actually kept this projection in FP8, let the normal path
-    # handle it (it has a weight_scale_inv param).
-    if target_s in params_dict:
+    # If the model actually kept this projection quantized, let the normal path
+    # handle it (it has the matching weight-scale parameter).
+    if any(
+        f"{layer_prefix}.{target_base}{candidate}" in params_dict
+        for candidate in (_BLOCK_FP8_SCALE_SUFFIX, _MXFP8_SCALE_SUFFIX)
+    ):
         return False
 
     entry = buf.setdefault(layer_prefix, {}).setdefault(key, {})
-    entry["weight" if is_weight else "scale"] = tensor
+    if is_weight:
+        entry["weight"] = tensor
+    else:
+        entry["scale"] = tensor
+        entry["scale_suffix"] = scale_suffix
     if "weight" not in entry or "scale" not in entry:
         return True
 
-    weight_fp8, scale_inv = entry["weight"], entry["scale"]
+    weight_fp8, scale = entry["weight"], entry["scale"]
     buf[layer_prefix].pop(key, None)
-    block_size = weight_fp8.shape[1] // scale_inv.shape[1]
-    weight_bf16 = _dequant_fp8_block(weight_fp8, scale_inv, block_size)
+    if not buf[layer_prefix]:
+        buf.pop(layer_prefix, None)
+    if entry.get("scale_suffix") == _MXFP8_SCALE_SUFFIX:
+        weight_bf16 = _dequant_mxfp8_block(weight_fp8, scale)
+    else:
+        block_size = weight_fp8.shape[1] // scale.shape[1]
+        weight_bf16 = _dequant_fp8_block(weight_fp8, scale, block_size)
     # NoPE: pad kv_a rope portion (kv_lora_rank -> kv_lora_rank + qk_rope_head_dim).
     if is_kva and kv_a_pad_size > 0:
         pad = torch.zeros(
@@ -1155,3 +1208,28 @@ def _try_load_fp8_attn_proj(
         param.weight_loader(param, weight_bf16, shard_id)
     loaded_params.add(target_w)
     return True
+
+
+def _raise_if_unpaired_fp8_weights(pending: dict) -> None:
+    """Fail loudly when a checkpoint FP8 weight never met its scale tensor.
+
+    The helpers above buffer a projection until both halves arrive. A leftover
+    entry means the checkpoint stores that scale under a name this loader does not
+    recognize while the model target is not quantized, so the weight would
+    otherwise be dropped silently and the layer would keep its allocation-time
+    values.
+    """
+    unpaired: list[str] = []
+    for layer_prefix, entry in sorted(pending.items()):
+        for key, value in entry.items():
+            if isinstance(value, dict):
+                if "weight" not in value or "scale" not in value:
+                    unpaired.append(f"{layer_prefix}.{key}")
+            elif key in ("weight", "scale"):
+                unpaired.append(layer_prefix)
+                break
+    if unpaired:
+        raise ValueError(
+            f"Unpaired FP8 weights in the checkpoint: {unpaired}. Each of them needs a matching "
+            f"{_BLOCK_FP8_SCALE_SUFFIX} or {_MXFP8_SCALE_SUFFIX} tensor."
+        )

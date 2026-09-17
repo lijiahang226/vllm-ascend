@@ -28,6 +28,7 @@ from .model import (
     Glm5NextDecoderLayer,
     Glm5NextMLAAttention,
     Glm5NextMoE,
+    _raise_if_unpaired_fp8_weights,
     _try_load_fp8_attn_proj,
     _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
@@ -398,6 +399,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
+        _raise_if_unpaired_fp8_weights(_pending_wk_fp8)
         loaded_layers: set[int] = set()
         for param_name in loaded_params:
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, param_name)
