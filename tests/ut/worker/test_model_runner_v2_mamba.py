@@ -1,4 +1,5 @@
 import ast
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -19,6 +20,7 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.attn_utils import (
     _allocate_kv_cache,
     _reshape_kv_cache_v2,
@@ -504,6 +506,53 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     if not vllm_version_is("0.28.0"):
         assert mtp_key_cache.data_ptr() - key_cache.data_ptr() == 40
         assert mtp_value_cache.data_ptr() - value_cache.data_ptr() == 40
+
+
+def test_release_aligned_hybrid_specs_keep_contiguous_state_layout(monkeypatch):
+    # Main removed this field; retain the release spec contract when exercising
+    # get_kv_cache_spec followed by allocation and reshape in either CI lane.
+    @dataclass(frozen=True, kw_only=True)
+    class ReleaseAttentionSpec(FullAttentionSpec):
+        indexes_kv_by_block_stride: bool = False
+
+    attention = ReleaseAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float16)
+    mamba = MambaSpec(block_size=4, shapes=((2,), (4,)), dtypes=(torch.float16, torch.float16), page_size_padded=20)
+    layers = {
+        name: SimpleNamespace(get_kv_cache_spec=lambda _config, spec=spec: spec)
+        for name, spec in (("full", attention), ("linear", mamba))
+    }
+    config = SimpleNamespace(additional_config={}, kv_transfer_config=None)
+    monkeypatch.setattr(attn_utils, "vllm_version_is", lambda _version: True)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: layers)
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(attn_utils, "get_kv_cache_tensor_layers", lambda descriptor: descriptor.shared_by)
+    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _config: False)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: False)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _config: False)
+    specs = get_kv_cache_spec(config)
+    assert specs["full"].indexes_kv_by_block_stride
+    plan = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[SimpleNamespace(size=40, shared_by=["full", "linear"])],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec) for name, spec in specs.items()],
+    )
+    groups = [
+        SimpleNamespace(
+            kv_cache_group_id=i,
+            kv_cache_spec=spec,
+            layer_names=[name],
+            backend=SimpleNamespace(get_kv_cache_shape=lambda n, b, h, d, *_args: (2, n, b, h, d)),
+        )
+        for i, (name, spec) in enumerate(specs.items())
+    ]
+    raw = _allocate_kv_cache(plan, {}, torch.device("cpu"))
+    caches = _reshape_kv_cache_v2(groups, raw, "auto", [4, 4], {}, plan)
+    key, value = caches["full"]
+    conv, ssm = caches["linear"]
+    ssm[1].fill_(42)
+    assert torch.count_nonzero(key[0]) == 0
+    assert torch.count_nonzero(value[0]) == 0
+    assert conv.is_contiguous() and ssm.is_contiguous()
 
 
 @patch(

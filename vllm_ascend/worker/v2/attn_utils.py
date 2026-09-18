@@ -674,7 +674,7 @@ def _allocate_kv_cache(
     }
     # Cross-group layers in one descriptor share a physical slot. Other
     # descriptors describe per-layer regions within a common backing.
-    uses_shared_slots = any(
+    uses_shared_slots = not vllm_version_is("0.28.0") and any(
         len({layer_group_ids[name] for name in get_kv_cache_tensor_layers(descriptor)}) > 1
         for descriptor in kv_cache_config.kv_cache_tensors
     )
@@ -1070,7 +1070,9 @@ def _reshape_kv_cache_v2(
     is_dsv4_model = _is_dsv4_model(vllm_config)
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     kv_caches: dict[str, Any] = {}
-    uses_padded_page_layout = requires_padded_page_layout(layer_kv_cache_spec.values())
+    uses_padded_page_layout = not vllm_version_is("0.28.0") and requires_padded_page_layout(
+        layer_kv_cache_spec.values()
+    )
 
     for group in attn_groups:
         if group.kv_cache_group_id >= len(kernel_block_sizes):
@@ -1178,7 +1180,10 @@ def _reshape_kv_cache_v2(
                 continue
 
             if isinstance(kv_cache_spec, AscendIndexerKPoolTailSpec) or (
-                (is_dsv4_model or getattr(kv_cache_spec, "indexes_kv_by_block_stride", False))
+                (
+                    is_dsv4_model
+                    or (not vllm_version_is("0.28.0") and getattr(kv_cache_spec, "indexes_kv_by_block_stride", False))
+                )
                 and isinstance(kv_cache_spec, (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec))
             ):
                 if not isinstance(raw_cache, torch.Tensor):

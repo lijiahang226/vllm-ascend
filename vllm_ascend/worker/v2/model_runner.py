@@ -274,6 +274,29 @@ class NPUModelRunner(GPUModelRunner):
                     self.speculator.pcp_manager = self.pcp_manager
 
         if not vllm_version_is("0.28.0"):
+            # Zero layer stride aliases complete pages across cache groups.
+            # Copy each logical slot once, including padding, even when the
+            # allocation has extra storage for KV-transfer alignment.
+            shared_cache_views: dict[int, torch.Tensor] = {}
+            for descriptor in self.kv_cache_config.kv_cache_tensors:
+                if len(descriptor.layers) < 2 or descriptor.layer_stride != 0:
+                    continue
+                layer_caches = [
+                    self.compilation_config.static_forward_context[name].kv_cache for name in descriptor.layers
+                ]
+                first = layer_caches[0]
+                if isinstance(first, (list, tuple)):
+                    first = first[0]
+                storage = first.untyped_storage()
+                base = first.storage_offset() * first.element_size()
+                assert base + descriptor.size <= storage.nbytes()
+                pages = torch.empty(0, dtype=torch.uint8, device=first.device).set_(
+                    storage, base, (self.kv_cache_config.num_blocks, descriptor.block_stride)
+                )
+                for cache in layer_caches:
+                    shared_cache_views[id(cache)] = pages
+            self.kv_caches = [shared_cache_views.get(id(cache), cache) for cache in self.kv_caches]
+
             # Layer bindings retain Ascend's component lists, while upstream
             # copy-on-write consumes a flat inventory of nonempty tensors.
             self.kv_caches = [

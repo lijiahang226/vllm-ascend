@@ -191,6 +191,9 @@ def _make_plan(num_blocks=3, main_head_size=4):
 
 @pytest.fixture(params=["v1", "v2"])
 def runner_factory(request, monkeypatch):
+    if request.param == "v2" and vllm_version_is("0.28.0"):
+        pytest.skip("GLM MRV2 pooled layouts require main's cache descriptors")
+
     def make_runner(config, main_cache_dims=(4, 0)):
         runner = _make_runner(config, main_cache_dims)
         if request.param == "v2":
@@ -292,9 +295,16 @@ def test_glm5_next_runner_splits_main_mla_components_within_each_page(runner_fac
 
 
 @pytest.mark.skipif(vllm_version_is("0.28.0"), reason="Copy-on-write uses the main KV cache contract")
-def test_mrv2_copy_on_write_preserves_pooled_pages_and_layer_bindings(runner_factory, monkeypatch):
-    config, _, plan = _make_plan()
-    allocator = runner_factory(config)
+@pytest.mark.parametrize("kv_transfer", [False, True])
+@pytest.mark.parametrize("reverse_bindings", [False, True])
+@pytest.mark.parametrize("main_cache_dims", [(4, 0), (4, 2)])
+def test_mrv2_copy_on_write_preserves_pooled_pages_and_layer_bindings(
+    runner_factory, monkeypatch, kv_transfer, reverse_bindings, main_cache_dims
+):
+    config, _, plan = _make_plan(main_head_size=sum(main_cache_dims))
+    if kv_transfer:
+        config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnectorV2")
+    allocator = runner_factory(config, main_cache_dims)
     raw_caches = allocator._allocate_kv_cache_tensors(plan)
     caches = allocator._reshape_kv_cache_tensors(plan, raw_caches)
     bindings = {name: SimpleNamespace(kv_cache=cache) for name, cache in caches.items()}
@@ -312,6 +322,8 @@ def test_mrv2_copy_on_write_preserves_pooled_pages_and_layer_bindings(runner_fac
     def initialize(_runner, cache_config, kv_cache_allocation_context=None):
         _runner.kv_cache_config = cache_config
         _runner.kv_caches = list(caches.values())
+        if reverse_bindings:
+            _runner.kv_caches.reverse()
 
     monkeypatch.setattr(GPUModelRunner, "initialize_kv_cache", initialize)
     with (
@@ -323,13 +335,12 @@ def test_mrv2_copy_on_write_preserves_pooled_pages_and_layer_bindings(runner_fac
     assert all(isinstance(cache, torch.Tensor) and cache.numel() > 0 for cache in runner.kv_caches)
     for name, cache in caches.items():
         assert bindings[name].kv_cache is cache
-        for tensor in cache:
-            if tensor.numel() > 0:
-                assert any(view is tensor for view in runner.kv_caches)
 
     # Copy a chain using the original source pages. Copying an aliased backing
     # twice would incorrectly propagate page 0 into page 2.
     for name in (MAIN, INDEXER):
+        raw = raw_caches[name]
+        torch.empty(0, dtype=torch.int8).set_(raw.untyped_storage()).fill_(99)
         pages = raw_caches[name].view(plan.num_blocks, -1)
         for page_id, value in enumerate((11, 22, 33)):
             pages[page_id].fill_(value)
@@ -342,6 +353,10 @@ def test_mrv2_copy_on_write_preserves_pooled_pages_and_layer_bindings(runner_fac
         pages = raw_caches[name].view(plan.num_blocks, -1)
         for page_id, value in enumerate((11, 11, 22)):
             assert torch.all(pages[page_id] == value)
+        raw = raw_caches[name]
+        storage = torch.empty(0, dtype=torch.int8).set_(raw.untyped_storage())
+        assert torch.all(storage[: raw.storage_offset()] == 99)
+        assert torch.all(storage[raw.storage_offset() + raw.numel() :] == 99)
 
 
 def test_standalone_mtp_uses_existing_compressed_cache_allocator(runner_factory):

@@ -132,6 +132,28 @@ def test_main_allocator_preserves_separate_ascend_kv_views(monkeypatch):
     assert value_cache.shape == expected_shape
 
 
+def test_release_shared_attention_preserves_kv_transfer_alignment(monkeypatch):
+    spec = FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float16)
+    config = SimpleNamespace(additional_config={}, kv_transfer_config=SimpleNamespace())
+    groups = [KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec) for name in ("full", "sliding")]
+    plan = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[SimpleNamespace(size=3 * spec.page_size_bytes, shared_by=["full", "sliding"])],
+        kv_cache_groups=groups,
+    )
+    monkeypatch.setattr(attn_utils, "vllm_version_is", lambda _version: True)
+    monkeypatch.setattr(attn_utils, "get_kv_cache_tensor_layers", lambda descriptor: descriptor.shared_by)
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: False)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _config: False)
+
+    raw = attn_utils._allocate_kv_cache(plan, {}, torch.device("cpu"))
+
+    assert isinstance(raw["full"], tuple)
+    assert all(left is right for left, right in zip(raw["full"], raw["sliding"]))
+    assert all(tensor.data_ptr() % (2 * 1024 * 1024) == 0 for tensor in raw["full"])
+
+
 @pytest.mark.skipif(
     vllm_version_is("0.28.0"),
     reason="vLLM #51718 only changed the main planner",
