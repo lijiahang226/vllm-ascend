@@ -30,7 +30,7 @@ def test_conv_updates_original_cache_and_preserves_other_pages(monkeypatch, layo
 
     class CopyState:
         def __getitem__(self, grid):
-            assert layout == "transposed", "Contiguous pages must not launch state copies"
+            assert layout != "contiguous", "Contiguous states must not launch state copies"
 
             def copy(cache, packed, cache_indices, query_starts, packed_indices, *args, WRITE_BACK, **kwargs):
                 copy_modes.append(WRITE_BACK)
@@ -50,7 +50,7 @@ def test_conv_updates_original_cache_and_preserves_other_pages(monkeypatch, layo
     def kernel(output, x_arg, weight_arg, **kwargs):
         kernel_state = kwargs["conv_state"]
         kernel_indices = kwargs["cache_indices_opt"]
-        if layout == "transposed":
+        if layout != "contiguous":
             assert kernel_state.is_contiguous()
             torch.testing.assert_close(kernel_indices, torch.tensor([0, -1, -1], dtype=torch.int32))
         else:
@@ -61,7 +61,7 @@ def test_conv_updates_original_cache_and_preserves_other_pages(monkeypatch, layo
         assert kwargs["num_accepted_tokens_opt"] is accepted
         assert kwargs["run_mode"] == (0 if mode == "prefill" else 1)
         assert torch.count_nonzero(output) == 0
-        kernel_state[0 if layout == "transposed" else 3].fill_(17)
+        kernel_state[0 if layout != "contiguous" else 3].fill_(17)
         # Returning a different tensor ensures graph functionalization's op
         # result is consumed; padding and skipped requests remain zero.
         result = output.clone()
@@ -86,7 +86,7 @@ def test_conv_updates_original_cache_and_preserves_other_pages(monkeypatch, layo
     torch.testing.assert_close(backing, saved)
     torch.testing.assert_close(out[:tokens_per_request], torch.full_like(out[:tokens_per_request], 2))
     assert torch.count_nonzero(out[tokens_per_request:]) == 0
-    assert copy_modes == ([False, True] if layout == "transposed" else [])
+    assert copy_modes == ([False, True] if layout != "contiguous" else [])
 
 
 def test_empty_batch_does_not_call_kernel(monkeypatch):

@@ -62,15 +62,10 @@ def causal_conv1d(
         return output
     kernel_state = conv_state
     kernel_indices = cache_indices
-    # AscendC reads the physical page stride, so padded shared caches can be
-    # updated directly, as in K3. Only transposed/strided page contents need
-    # staging; keep their writes aliased to the original persistent cache.
-    needs_state_copy = (
-        conv_state.stride(1) != conv_state.shape[2]
-        or conv_state.stride(2) != 1
-        or conv_state.stride(0) < conv_state.shape[1] * conv_state.shape[2]
-    )
-    if needs_state_copy:
+    # aclnnCausalConv1d materializes a non-contiguous state without writing its
+    # mutations back to the view. Stage only this batch's rows, retaining both
+    # page strides and DS layouts; never copy the entire persistent cache.
+    if not conv_state.is_contiguous():
         requests = cache_indices.shape[0]
         state_len, dim = conv_state.shape[1:]
         kernel_state = torch.empty((requests, state_len, dim), dtype=conv_state.dtype, device=conv_state.device)
@@ -106,6 +101,6 @@ def causal_conv1d(
         pad_slot_id=PAD_SLOT_ID,
         run_mode=run_mode,
     )
-    if needs_state_copy:
+    if not conv_state.is_contiguous():
         _copy_conv_state[copy_grid](*copy_args, WRITE_BACK=True, BLOCK=CONV_STATE_COPY_BLOCK_SIZE)
     return result

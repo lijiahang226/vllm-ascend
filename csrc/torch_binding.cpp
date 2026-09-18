@@ -47,6 +47,7 @@
 #include "attention/fused_sparse_attention_overlap/fused_sparse_attention_overlap_torch_adpt.h"
 #include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
+#include "moe/causal_conv1d/causal_conv1d_update_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_kda/recurrent_kda_torch_adpt.h"
 #include "attention/chunk_kda_fwd/chunk_kda_fwd_torch_adpt.h"
@@ -3328,6 +3329,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                         int run_mode"
         ") -> (Tensor output)");
     ops.impl("npu_causal_conv1d_custom", torch::kPrivateUse1, &vllm_ascend::npu_causal_conv1d_custom);
+
+    ops.def(
+        "npu_causal_conv1d_update(Tensor(a!) output, Tensor x, Tensor weight, "
+        "Tensor(b!) conv_state, Tensor? bias, Tensor? query_start_loc, "
+        "Tensor? cache_indices, Tensor? num_accepted_tokens, "
+        "Tensor? block_idx_last_scheduled_token, Tensor? initial_state_idx, "
+        "str activation, int null_block_id, int max_query_len) -> Tensor(a!)");
+    ops.impl("npu_causal_conv1d_update", torch::kPrivateUse1, &vllm_ascend::npu_causal_conv1d_update);
 
     ops.def(
         "moe_gating_top_k_hash("

@@ -3,76 +3,119 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 
-from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import enable_custom_op, is_950
+
+
+def _reference_update(x, weight, state, indices, lengths, accepted):
+    """Independent CPU reference, including the sliding MTP history window."""
+    output = torch.zeros_like(x)
+    width = weight.shape[0]
+    start = 0
+    for request, (slot, length) in enumerate(zip(indices, lengths)):
+        if slot >= 0 and length > 0:
+            offset = 0 if accepted is None else accepted[request] - 1
+            history = state[slot, offset : offset + width - 1].clone()
+            tokens = x[start : start + length]
+            sequence = torch.cat((history, tokens))
+            convolved = F.conv1d(sequence.T.unsqueeze(0).float(), weight.T.unsqueeze(1).float(), groups=x.shape[1])
+            output[start : start + length] = F.silu(convolved).squeeze(0).T.to(x.dtype)
+            updated = sequence[-(width - 1) :] if accepted is None else sequence[1:]
+            state[slot, : updated.shape[0]].copy_(updated)
+        start += length
+    return output
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("mode", ["prefill", "decode", "spec"])
+@pytest.mark.parametrize("speculative", [False, True])
 @pytest.mark.parametrize("dim", [384, 6144])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("use_graph", [False, True])
-@pytest.mark.parametrize("invalid_slot", [-1, 7])
-def test_paged_conv_state_matches_contiguous_cache(mode, dim, dtype, use_graph, invalid_slot, monkeypatch):
+def test_cann_update_output_and_state_writeback(speculative, dim, dtype, use_graph):
+    if not is_950():
+        pytest.skip("CANN CausalConv1dUpdate currently supports Ascend 950 only")
     enable_custom_op()
     torch.manual_seed(0)
     slots, width, state_len = 5, 4, 5
-    page_size = state_len * dim + 64
+    page_size = state_len * dim
     storage_offset = 32
+    strides = (page_size, dim, 1)
     backing = torch.full((storage_offset + slots * page_size,), -7, device="npu", dtype=dtype)
-    state = backing.as_strided((slots, state_len, dim), (page_size, dim, 1), storage_offset=storage_offset)
-    initial_state = torch.randn(state.shape, device="npu", dtype=dtype)
+    state = backing.as_strided((slots, state_len, dim), strides, storage_offset=storage_offset)
+    initial_state = torch.randn(state.shape, dtype=dtype)
     state.copy_(initial_state)
-    original = backing.clone()
+    original = backing.cpu()
     reference = initial_state.clone()
-    lengths = [65, 0, 7, 130] if mode == "prefill" else ([3, 0, 3, 3] if mode == "spec" else [1, 0, 1, 1])
+    indices_cpu = [3, -1, 1, 2]
+    lengths = [3, 0, 2, 1] if speculative else [1, 1, 1, 1]
     starts = torch.tensor([0, *torch.tensor(lengths).cumsum(0).tolist()], device="npu", dtype=torch.int32)
-    indices = torch.tensor([[3, 4], [2, 3], [invalid_slot, invalid_slot], [1, 2]], device="npu", dtype=torch.int32)
-    x = torch.randn(sum(lengths) + 1, dim, device="npu", dtype=dtype)
-    weight = torch.randn(width, dim, device="npu", dtype=dtype)
-    initial = torch.tensor([True, True, False, False], device="npu") if mode == "prefill" else None
-    accepted = torch.tensor([2, 1, 1, 3], device="npu", dtype=torch.int32) if mode == "spec" else None
+    indices = torch.tensor(indices_cpu, device="npu", dtype=torch.int32)
+    x_cpu = torch.randn(sum(lengths), dim, dtype=dtype)
+    weight_cpu = torch.randn(width, dim, dtype=dtype)
+    x, weight = x_cpu.to("npu"), weight_cpu.to("npu")
+    # Include full acceptance (3) as well as rejection to a shorter history.
+    accepted_cpu = [3, 1, 2, 1] if speculative else None
+    accepted = torch.tensor(accepted_cpu, device="npu", dtype=torch.int32) if speculative else None
+    kernel_x = x if speculative else x.unsqueeze(1)
+    output = torch.zeros_like(kernel_x)
 
-    # A page gap must use the original cache directly, including graph capture.
-    monkeypatch.setattr("vllm_ascend.models.glm5next.ops.causal_conv1d._copy_conv_state", None)
-
-    def run(cache):
-        return causal_conv1d(
-            x,
+    def run():
+        return torch.ops._C_ascend.npu_causal_conv1d_update(
+            output,
+            kernel_x,
             weight,
-            cache,
-            starts,
-            indices,
-            run_mode=0 if mode == "prefill" else 1,
-            initial_state_mode=initial,
+            state,
+            bias=None,
+            query_start_loc=starts if speculative else None,
+            cache_indices=indices,
             num_accepted_tokens=accepted,
+            block_idx_last_scheduled_token=None,
+            initial_state_idx=None,
+            activation="silu",
+            null_block_id=-1,
+            max_query_len=max(lengths),
         )
 
     if use_graph:
         for _ in range(2):
-            run(state)
+            run()
         torch.npu.synchronize()
         graph = torch.npu.NPUGraph()
         with torch.npu.graph(graph):
-            actual = run(state)
+            actual = run()
         state.copy_(initial_state)
 
-    # Reuse the updated state to expose missing writes as well as wrong reads.
     for _ in range(2):
-        expected = run(reference)
+        expected = _reference_update(x_cpu, weight_cpu, reference, indices_cpu, lengths, accepted_cpu)
         if use_graph:
             graph.replay()
         else:
-            actual = run(state)
+            actual = run()
         torch.npu.synchronize()
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-        torch.testing.assert_close(state, reference, rtol=0, atol=0)
+        torch.testing.assert_close(actual.reshape_as(x).cpu(), expected, rtol=2e-2, atol=2e-2)
+        torch.testing.assert_close(state.cpu(), reference, rtol=0, atol=0)
         expected_backing = original.clone()
-        expected_backing.as_strided(state.shape, state.stride(), storage_offset=storage_offset).copy_(reference)
-        torch.testing.assert_close(backing, expected_backing, rtol=0, atol=0)
-        # Slots 0, 2 (zero query length), and 4 must retain their old history.
-        torch.testing.assert_close(state[[0, 2, 4]], initial_state[[0, 2, 4]], rtol=0, atol=0)
-        skipped_start = lengths[0]
-        assert torch.count_nonzero(actual[skipped_start : skipped_start + lengths[2]]).item() == 0
-        assert torch.count_nonzero(actual[-1]).item() == 0
+        expected_backing.as_strided(state.shape, strides, storage_offset=storage_offset).copy_(reference)
+        torch.testing.assert_close(backing.cpu(), expected_backing, rtol=0, atol=0)
+
+
+def test_cann_update_meta_preserves_output_alias():
+    enable_custom_op()
+    output = torch.empty(2, 1, 384, device="meta")
+    result = torch.ops._C_ascend.npu_causal_conv1d_update(
+        output,
+        torch.empty_like(output),
+        torch.empty(4, 384, device="meta"),
+        torch.empty(5, 3, 384, device="meta"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        "silu",
+        -1,
+        1,
+    )
+    assert result is output
