@@ -273,6 +273,16 @@ class NPUModelRunner(GPUModelRunner):
                 if self.speculator is not None:
                     self.speculator.pcp_manager = self.pcp_manager
 
+        if not vllm_version_is("0.28.0"):
+            # Layer bindings retain Ascend's component lists, while upstream
+            # copy-on-write consumes a flat inventory of nonempty tensors.
+            self.kv_caches = [
+                tensor
+                for cache in self.kv_caches
+                for tensor in (cache if isinstance(cache, (list, tuple)) else (cache,))
+                if tensor.numel() > 0
+            ]
+
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.
         draft_layer_names: set[str] = getattr(self.speculator, "draft_attn_layer_names", set())

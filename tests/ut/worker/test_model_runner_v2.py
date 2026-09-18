@@ -531,6 +531,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
 
     def _super(self, kv_cache_config, kv_cache_allocation_context=None):
         self.kv_cache_config = kv_cache_config
+        self.kv_caches = []
         self.attn_groups = []
         seen["factory"] = vllm_model_runner.ModelCudaGraphManager
         seen["cfg"] = kv_cache_config
@@ -581,6 +582,7 @@ def test_initialize_kv_cache_forwards_allocation_context_by_vllm_version(is_vllm
         called = True
         captured_kwargs.update(kwargs)
         self.kv_cache_config = kv_cache_config
+        self.kv_caches = []
         self.attn_groups = []
 
     with (

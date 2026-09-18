@@ -166,11 +166,13 @@ def test_invalid_pool_geometry_is_rejected(ratio):
 
 
 @pytest.mark.parametrize("storage_block_size", [8, 24, 144, 1536, 2048])
-def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
+@pytest.mark.parametrize("kernel_spec", [False, True])
+def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size, kernel_spec):
     pool_size = 16
     logical_size = storage_block_size * pool_size
     split = logical_size // 128
     config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=logical_size),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=4, max_num_seqs=1),
         model_config=SimpleNamespace(max_model_len=logical_size * 3),
     )
@@ -182,6 +184,8 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
         **({"compress_ratio": pool_size} if vllm_version_is("0.28.0") else {"tokens_per_state": pool_size}),
         model_version="glm5_next",
     )
+    if kernel_spec:
+        spec = spec.copy_with_new_block_size(128)
     builders = [
         AscendIndexerKPoolMetadataBuilder(spec, ["layer.indexer.k_cache"], config, torch.device("cpu"))
         for _ in range(2)
@@ -265,6 +269,7 @@ def test_model_cache_layers_publish_source_compatible_specs():
 
 def test_indexer_metadata_preserves_raw_request_boundaries():
     config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=256),
         scheduler_config=SimpleNamespace(
             max_num_batched_tokens=16,
             max_num_seqs=2,
