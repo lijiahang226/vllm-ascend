@@ -137,7 +137,9 @@
  
      auto sShapePtr = context->GetInputShape(CONV_STATES_INDEX);
      OP_CHECK_NULL_WITH_CONTEXT(context, sShapePtr);
-     auto sShape = EnsureNotScalar(sShapePtr->GetStorageShape());
+     const auto &stateOriginShape = sShapePtr->GetOriginShape();
+     auto sShape = EnsureNotScalar(stateOriginShape.GetDimNum() == 0 ?
+                                      sShapePtr->GetStorageShape() : stateOriginShape);
      OP_CHECK_IF(sShape.GetDimNum() != 3, OP_LOGE(context, "convStates must be 3D: (num_cache_lines, state_len, dim)"),
                  return ge::GRAPH_FAILED);
      const int64_t numCacheLines = sShape.GetDim(0);
@@ -148,6 +150,23 @@
      OP_CHECK_IF(sDim != dim, OP_LOGE(context, "convStates.shape[2] must equal dim"), return ge::GRAPH_FAILED);
      OP_CHECK_IF(stateLen < (width - 1), OP_LOGE(context, "convStates.shape[1] must be >= width-1"),
                  return ge::GRAPH_FAILED);
+
+     // Hybrid caches share padded physical pages with attention. Preserve the
+     // page stride so convolution updates the original cache in place.
+     tiling.stateStride = stateLen * dim;
+     const auto *stateStrides = context->GetRequiredInputStride(CONV_STATES_INDEX);
+     if (stateStrides == nullptr) {
+         stateStrides = context->GetInputStride(CONV_STATES_INDEX);
+     }
+     if (stateStrides != nullptr && stateStrides->GetDimNum() != 0) {
+         OP_CHECK_IF(stateStrides->GetDimNum() != 3,
+                     OP_LOGE(context, "convStates strides must be 3D"), return ge::GRAPH_FAILED);
+         OP_CHECK_IF(stateStrides->GetStride(1) != dim || stateStrides->GetStride(2) != 1 ||
+                         stateStrides->GetStride(0) < stateLen * dim,
+                     OP_LOGE(context, "convStates requires contiguous, non-overlapping [state_len, dim] pages"),
+                     return ge::GRAPH_FAILED);
+         tiling.stateStride = stateStrides->GetStride(0);
+     }
  
      auto qslShapePtr = context->GetOptionalInputShape(QUERY_START_LOC_INDEX);
      const gert::CompileTimeTensorDesc *qslDesc = context->GetOptionalInputDesc(QUERY_START_LOC_INDEX);
@@ -182,16 +201,15 @@
                  return ge::GRAPH_FAILED);
  
      if (!qslAbsent && isDecodeMode && inputMode == 2) {
-         const int64_t batchFromQsl = qslSize - 1;
-         if (batchFromQsl != batch) {
-             inputMode = 0;
-             cuSeqlen = xShape.GetDim(0);
-             batch = batchFromQsl;
-             seqLen = 0;
-             OP_CHECK_IF(dim <= 0 || cuSeqlen < 0 || batch < 0,
-                         OP_LOGE(context, "invalid x/queryStartLoc shapes for 2D varlen decode mode"),
-                         return ge::GRAPH_FAILED);
-         }
+         // Padded tokens can make token and request counts equal despite an
+         // empty request. Honor the boundaries instead of updating its state.
+         inputMode = 0;
+         cuSeqlen = xShape.GetDim(0);
+         batch = qslSize - 1;
+         seqLen = 0;
+         OP_CHECK_IF(dim <= 0 || cuSeqlen < 0 || batch < 0,
+                     OP_LOGE(context, "invalid x/queryStartLoc shapes for 2D varlen decode mode"),
+                     return ge::GRAPH_FAILED);
      }
  
      if (inputMode == 0) {
