@@ -104,6 +104,25 @@ def test_completed_pool_slots_preserve_logical_block_padding():
     assert actual.tolist() == [-1, -1, 0, -1, 7, -1, 8, -1]
 
 
+@pytest.mark.parametrize("logical_size,ratio", [(128, 4), (128, 16), (512, 16), (384, 12)])
+def test_completed_pool_slots_with_nonsequential_pages(logical_size, ratio):
+    # Exercise page boundaries, incomplete pools, invalid slots and addresses
+    # beyond int32 without requiring large cache allocations.
+    positions = torch.arange(logical_size * 2, dtype=torch.int64)
+    pages = torch.tensor([7, 1 << 32], dtype=torch.int64).repeat_interleave(logical_size)
+    slots = pages * logical_size + positions % logical_size
+    slots[::17] = -1
+    expected = torch.tensor(
+        [
+            (slot // logical_size) * (logical_size // ratio) + (slot % logical_size) // ratio
+            if slot >= 0 and (pos + 1) % ratio == 0
+            else -1
+            for slot, pos in zip(slots.tolist(), positions.tolist())
+        ]
+    )
+    torch.testing.assert_close(format_indexer_kpool_slot_mapping(slots, positions, logical_size, ratio), expected)
+
+
 def test_tail_manager_retains_one_private_block_until_free():
     spec = AscendIndexerKPoolTailSpec(
         block_size=4,

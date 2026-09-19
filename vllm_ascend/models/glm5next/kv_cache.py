@@ -38,14 +38,10 @@ def format_indexer_kpool_slot_mapping(
             f"logical_block_size={logical_block_size} must be divisible by compress_ratio={compress_ratio}."
         )
     valid = (slot_mapping >= 0) & (torch.remainder(positions + 1, compress_ratio) == 0)
-    safe_slots = slot_mapping.clamp_min(0)
-    block_ids = torch.div(safe_slots, logical_block_size, rounding_mode="floor")
-    offsets = torch.remainder(safe_slots, logical_block_size)
-    compressed_slots = block_ids * (logical_block_size // compress_ratio) + torch.div(
-        offsets,
-        compress_ratio,
-        rounding_mode="floor",
-    )
+    # Since logical_block_size is divisible by compress_ratio, dividing the
+    # physical slot gives the same page and pool offset in one operation.
+    # Negative slots are discarded by valid below.
+    compressed_slots = torch.div(slot_mapping, compress_ratio, rounding_mode="floor")
     return torch.where(valid, compressed_slots, torch.full_like(compressed_slots, -1))
 
 
