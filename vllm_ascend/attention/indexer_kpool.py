@@ -239,8 +239,9 @@ class AscendIndexerKPoolBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
         cache_type: str = "",
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        del cache_type
+        del cache_type, cache_dtype_str
         if num_kv_heads != 1:
             raise ValueError(f"Indexer KPool cache requires one KV head, got {num_kv_heads}.")
         return (num_blocks, block_size, num_kv_heads, head_size)
@@ -328,8 +329,9 @@ class AscendIndexerKPoolTailBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
         cache_type: str = "",
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        del cache_type
+        del cache_type, cache_dtype_str
         if num_kv_heads != 1:
             raise ValueError(f"Indexer KPool tail cache requires one KV head, got {num_kv_heads}.")
         return (num_blocks, 2, block_size, head_size)

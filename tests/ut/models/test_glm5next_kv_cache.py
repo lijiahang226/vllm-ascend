@@ -261,6 +261,8 @@ def test_model_cache_layers_publish_source_compatible_specs():
     assert state_spec.indexes_kv_by_block_stride
     assert indexer.get_attn_backend() is AscendIndexerKPoolBackend
     assert state.get_attn_backend() is AscendIndexerKPoolTailBackend
+    assert indexer.get_attn_backend().get_kv_cache_shape(3, 16, 1, 128, cache_dtype_str="auto") == (3, 16, 1, 128)
+    assert state.get_attn_backend().get_kv_cache_shape(3, 16, 1, 128, cache_dtype_str="auto") == (3, 2, 16, 128)
     assert set(current_config.compilation_config.static_forward_context) == {
         indexer.prefix,
         state.prefix,

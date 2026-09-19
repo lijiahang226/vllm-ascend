@@ -23,6 +23,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     requires_padded_page_layout,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import collect_configured_register_regions
 from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_config,
     get_glm5_next_kv_cache_groups,
@@ -307,6 +308,12 @@ def test_mrv2_copy_on_write_preserves_pooled_pages_and_layer_bindings(
     allocator = runner_factory(config, main_cache_dims)
     raw_caches = allocator._allocate_kv_cache_tensors(plan)
     caches = allocator._reshape_kv_cache_tensors(plan, raw_caches)
+    if kv_transfer:
+        regions = collect_configured_register_regions(plan, caches)
+        assert set(zip(regions.ptrs, regions.lengths)) == {
+            (raw_caches[name].data_ptr(), raw_caches[name].numel()) for name in (MAIN, INDEXER)
+        }
+        assert regions.logical_tensor_count == len(plan.kv_cache_tensors)
     bindings = {name: SimpleNamespace(kv_cache=cache) for name, cache in caches.items()}
     config.compilation_config.static_forward_context = bindings
 
