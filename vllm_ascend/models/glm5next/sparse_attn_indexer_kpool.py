@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import torch
 from torch import nn
 
+from vllm_ascend.models.glm5next.ops.indexer_finalize import finalize_indices
 from vllm_ascend.ops.triton.glm5_next_kpool_tail_compress import (  # type: ignore[import-untyped]
     glm5_next_kpool_tail_compress_and_write_cache_triton,
 )
@@ -21,33 +22,6 @@ if TYPE_CHECKING:
         AscendIndexerKPoolMetadata,
         AscendIndexerKPoolTailMetadata,
     )
-
-
-def append_causal_tail(
-    indices: torch.Tensor,
-    positions: torch.Tensor,
-    topk_tokens: int,
-    pool_size: int,
-) -> None:
-    """Append unpooled tokens to the valid prefix required by CANN SFA."""
-    tail_width = pool_size - 1
-    if tail_width == 0:
-        return
-    positions = positions.to(torch.int64)
-    tail_start = torch.div(positions + 1, pool_size, rounding_mode="floor") * pool_size
-    tail_cols = torch.arange(tail_width, device=indices.device, dtype=torch.int64)
-    tail_tokens = tail_start.unsqueeze(1) + tail_cols
-    tail_values = torch.where(
-        tail_cols < (positions + 1 - tail_start).unsqueeze(1),
-        tail_tokens,
-        -1,
-    ).to(indices.dtype)
-    # PKI packs complete pools at the front. Short requests have fewer than
-    # topk_tokens history entries; placing the tail at that fixed column would
-    # leave invalid holes, and SFA would skip the unpooled tokens.
-    indices[:, topk_tokens:] = -1
-    tail_offsets = tail_start.clamp(max=topk_tokens).unsqueeze(1) + tail_cols
-    indices.scatter_(1, tail_offsets, tail_values)
 
 
 class SparseAttnIndexerKpool(nn.Module):
@@ -79,6 +53,7 @@ class SparseAttnIndexerKpool(nn.Module):
         index_kpool: int,
         max_pool_seq_len: int,
         compute_topk: bool,
+        output_buffer: torch.Tensor | None = None,
     ) -> torch.Tensor | None:
         num_tokens = k.shape[0]
         if index_kpool <= 0 or self.topk_tokens % index_kpool:
@@ -141,7 +116,12 @@ class SparseAttnIndexerKpool(nn.Module):
         )
         # A2/A3 SFA requires a contiguous valid prefix; the reference indexer
         # puts the running tail at the fixed top-k column for short requests.
-        append_causal_tail(indices[:, 0], positions, self.topk_tokens, index_kpool)
-        valid = torch.arange(num_tokens, device=k.device) < indexer_metadata.cum_query_lens[-1]
-        indices.masked_fill_(~valid[:, None, None], -1)
+        finalize_indices(
+            indices[:, 0],
+            positions,
+            self.topk_tokens,
+            index_kpool,
+            indexer_metadata.cum_query_lens,
+            output_buffer,
+        )
         return indices

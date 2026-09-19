@@ -26,7 +26,7 @@ with patch.dict(
     },
 ):
     import vllm_ascend.models.glm5next.sparse_attn_indexer_kpool as kpool_module
-    from vllm_ascend.models.glm5next.sparse_attn_indexer_kpool import SparseAttnIndexerKpool, append_causal_tail
+    from vllm_ascend.models.glm5next.sparse_attn_indexer_kpool import SparseAttnIndexerKpool
 
 
 def test_cache_metadata_import_does_not_require_indexer_operators() -> None:
@@ -46,30 +46,6 @@ def test_cache_metadata_import_does_not_require_indexer_operators() -> None:
 
     assert module.AscendIndexerKPoolBackend.get_builder_cls() is module.AscendIndexerKPoolMetadataBuilder
     assert module.AscendIndexerKPoolTailBackend.get_builder_cls() is module.AscendIndexerKPoolTailMetadataBuilder
-
-
-@pytest.mark.parametrize("pool_size", [1, 4])
-def test_causal_tail_follows_valid_history_without_holes(pool_size: int) -> None:
-    topk = 8
-    positions = torch.tensor([0, 1, 2, 3, 4, 6, 7, 8, 10, 15, 18])
-    indices = torch.full((positions.numel(), topk + pool_size - 1), -1, dtype=torch.int32)
-    expected_rows = []
-    for row, position in enumerate(positions.tolist()):
-        tail_start = (position + 1) // pool_size * pool_size
-        # Reverse the selected pools to ensure their ranking is preserved.
-        groups = list(reversed(range(min(tail_start // pool_size, topk // pool_size))))
-        history = [group * pool_size + offset for group in groups for offset in range(pool_size)]
-        indices[row, : len(history)] = torch.tensor(history, dtype=torch.int32)
-        tail = list(range(tail_start, position + 1))
-        if tail:
-            indices[row, topk : topk + len(tail)] = torch.tensor(tail, dtype=torch.int32)
-        expected_rows.append(history + tail + [-1] * (indices.shape[1] - len(history) - len(tail)))
-
-    pointer = indices.data_ptr()
-    append_causal_tail(indices, positions, topk, pool_size)
-
-    assert indices.data_ptr() == pointer
-    torch.testing.assert_close(indices, torch.tensor(expected_rows, dtype=torch.int32))
 
 
 def _indexer_metadata(num_tokens: int = 8) -> AscendIndexerKPoolMetadata:
@@ -117,8 +93,22 @@ def test_triton_indexer_updates_both_caches_and_masks_padding(monkeypatch, compu
         cache[0, 0].fill_(11)
 
     select = MagicMock(return_value=torch.full((10, 1, 7), -1, dtype=torch.int32))
+    output = torch.full((10, 128), 99, dtype=torch.int32)
+
+    def finalize(indices, positions, topk, pool, query_ends, destination):
+        assert indices.data_ptr() == select.return_value.data_ptr()
+        assert positions is metadata.positions
+        assert (topk, pool) == (4, 4)
+        assert query_ends is metadata.cum_query_lens
+        assert destination is output
+        indices[:8].fill_(13)
+        output.fill_(-1)
+        output[:, :7].copy_(indices)
+
+    finalize_mock = MagicMock(side_effect=finalize)
     monkeypatch.setattr(kpool_module, "glm5_next_kpool_tail_compress_and_write_cache_triton", compress)
     monkeypatch.setattr(kpool_module, "glm5_next_lightning_indexer_triton", select)
+    monkeypatch.setattr(kpool_module, "finalize_indices", finalize_mock)
     result = SparseAttnIndexerKpool(4, 2)(
         torch.zeros(10, 2),
         torch.zeros(10, 1, 2, dtype=torch.bfloat16),
@@ -133,16 +123,23 @@ def test_triton_indexer_updates_both_caches_and_masks_padding(monkeypatch, compu
         index_kpool=4,
         max_pool_seq_len=1,
         compute_topk=compute_topk,
+        output_buffer=output,
     )
     torch.testing.assert_close(tail_cache[0, 0], torch.full_like(tail_cache[0, 0], 7))
     torch.testing.assert_close(indexer_cache[0, 0], torch.full_like(indexer_cache[0, 0], 11))
     if compute_topk:
         assert result.shape == (10, 1, 7)
         assert (result[8:] == -1).all()
+        assert (result[:8] == 13).all()
+        torch.testing.assert_close(output[:, :7], result[:, 0])
+        assert (output[:, 7:] == -1).all()
         select.assert_called_once()
+        finalize_mock.assert_called_once()
     else:
         assert result is None
         select.assert_not_called()
+        finalize_mock.assert_not_called()
+        assert (output == 99).all()
 
 
 @pytest.mark.parametrize(
