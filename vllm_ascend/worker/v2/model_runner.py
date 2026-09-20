@@ -56,6 +56,7 @@ from vllm_ascend.ascend_forward_context import (
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
@@ -65,6 +66,7 @@ from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_v
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
+from vllm_ascend.worker.v2.block_table import AscendBlockTables
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
@@ -268,6 +270,21 @@ class NPUModelRunner(GPUModelRunner):
                 self.model_state.pcp_manager = self.pcp_manager
                 if self.speculator is not None:
                     self.speculator.pcp_manager = self.pcp_manager
+
+        circular = [is_circular_kv_cache_spec(group.kv_cache_spec) for group in self.kv_cache_config.kv_cache_groups]
+        if any(circular):
+            if not isinstance(self.block_tables, AscendBlockTables):
+                raise TypeError("Circular slot mapping requires Ascend block tables.")
+            if self.block_tables.cp_size != 1:
+                raise ValueError("Circular tail caches do not support context parallelism.")
+            if any(
+                is_circular and block_size != kernel_block_size
+                for is_circular, block_size, kernel_block_size in zip(
+                    circular, self.block_tables.block_sizes, self.block_tables.kernel_block_sizes
+                )
+            ):
+                raise ValueError("Circular caches must retain their physical ring capacity.")
+            self.block_tables.is_circular = torch.tensor(circular, dtype=torch.bool, device=self.device)
 
         # Zero layer stride aliases complete pages across cache groups.
         # Copy each logical slot once, including padding, even when the

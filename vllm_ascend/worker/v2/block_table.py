@@ -67,6 +67,7 @@ class AscendBlockTables(BlockTables):
         min_kernel_block_size = min(kernel_block_sizes)
         window_size = (self._triton_block_size + min_kernel_block_size - 1) // min_kernel_block_size + 1
         self._block_table_window_size = triton.next_power_of_2(window_size)
+        self.is_circular: torch.Tensor | None = None
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.
         del self.slot_mappings
@@ -110,5 +111,7 @@ class AscendBlockTables(BlockTables):
             BLOCK_TABLE_WINDOW_SIZE=self._block_table_window_size,
             slot_mapping_enabled=slot_mapping_enabled,
             HAS_SLOT_MAPPING_ENABLED=True,
+            is_circular_ptr=self.is_circular,
+            HAS_CIRCULAR=self.is_circular is not None,
         )
         return slot_mappings[:, :num_tokens_padded]

@@ -14,6 +14,7 @@ from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.v2.block_table import AscendBlockTables
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -590,6 +591,51 @@ def test_initialize_kv_cache_forwards_allocation_context():
 
     assert called is True
     assert captured_kwargs["kv_cache_allocation_context"] is allocation_context
+
+
+@pytest.mark.parametrize(
+    "circular,cp_size,kernel_sizes,error",
+    [
+        ([False, False], 2, [8, 4], None),
+        ([False, True], 1, [8, 4], None),
+        ([False, True], 2, [8, 4], ValueError),
+        ([False, True], 1, [8, 2], ValueError),
+    ],
+)
+def test_initialize_kv_cache_configures_circular_slot_mapping(circular, cp_size, kernel_sizes, error):
+    runner = _make_runner()
+    runner.device = torch.device("cpu")
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.speculator = None
+    runner.model_config = SimpleNamespace(enable_return_routed_experts=False)
+    tables = AscendBlockTables.__new__(AscendBlockTables)
+    tables.is_circular = None
+    tables.cp_size = cp_size
+    tables.block_sizes = [16, 4]
+    tables.kernel_block_sizes = kernel_sizes
+    runner.block_tables = tables
+    plan = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(is_circular=value)) for value in circular],
+    )
+
+    def initialize(_runner, cache_config, kv_cache_allocation_context=None):
+        _runner.kv_cache_config = cache_config
+        _runner.kv_caches = []
+
+    with (
+        patch.object(GPUModelRunner, "initialize_kv_cache", initialize),
+        patch("vllm_ascend.worker.v2.model_runner.graph_manager_wrapper", return_value=nullcontext()),
+        patch("vllm_ascend.worker.v2.model_runner.KVPPRuntime.create_from_kv_cache"),
+        pytest.raises(error) if error else nullcontext(),
+    ):
+        runner.initialize_kv_cache(plan)
+
+    if any(circular) and error is None:
+        torch.testing.assert_close(tables.is_circular, torch.tensor(circular))
+    else:
+        assert tables.is_circular is None
 
 
 @pytest.mark.parametrize("layer_stride,layer_names", [(0, ["single"]), (24, ["first", "second"])])

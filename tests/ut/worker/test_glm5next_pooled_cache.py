@@ -32,6 +32,7 @@ from vllm_ascend.models.glm5next.cache_config import (
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.worker.v2 import attn_utils
+from vllm_ascend.worker.v2.block_table import AscendBlockTables
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
 
 MAIN = "model.layers.1.attn"
@@ -315,6 +316,7 @@ def test_mrv2_copy_on_write_preserves_pooled_pages_and_layer_bindings(
     config.compilation_config.static_forward_context = bindings
 
     runner = NPUModelRunnerV2.__new__(NPUModelRunnerV2)
+    runner.device = torch.device("cpu")
     runner.vllm_config = config
     runner.compilation_config = config.compilation_config
     runner.model_config = SimpleNamespace(enable_return_routed_experts=False)
@@ -325,6 +327,11 @@ def test_mrv2_copy_on_write_preserves_pooled_pages_and_layer_bindings(
 
     def initialize(_runner, cache_config, kv_cache_allocation_context=None):
         _runner.kv_cache_config = cache_config
+        _runner.block_tables = AscendBlockTables.__new__(AscendBlockTables)
+        _runner.block_tables.cp_size = 1
+        _runner.block_tables.block_sizes = [group.kv_cache_spec.block_size for group in cache_config.kv_cache_groups]
+        _runner.block_tables.kernel_block_sizes = _runner.block_tables.block_sizes
+        _runner.block_tables.is_circular = None
         _runner.kv_caches = list(caches.values())
         if reverse_bindings:
             _runner.kv_caches.reverse()

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -60,6 +61,7 @@ def test_init_defaults_kernel_sizes_and_rebuilds_int32_slots():
     assert tables.kernel_block_sizes == [4]
     assert tables.slot_mappings.dtype == torch.int32
     assert tables.slot_mappings.shape == (1, 8)
+    assert tables.is_circular is None
     if hasattr(tables, "_triton_block_size"):
         assert tables._triton_block_size == _TRITON_BLOCK_SIZE
     if hasattr(tables, "_block_table_window_size"):
@@ -130,6 +132,7 @@ def _make_uninitialized_tables():
     tables.block_sizes_tensor = MagicMock(name="sizes")
     tables.kernel_block_sizes_tensor = MagicMock(name="kernel_sizes")
     tables.slot_mapping_enabled = MagicMock(name="enabled")
+    tables.is_circular = None
     tables.cp_rank = 1
     tables.cp_size = 2
     tables.cp_interleave = 4
@@ -139,8 +142,12 @@ def _make_uninitialized_tables():
     return tables
 
 
-def test_compute_slot_mappings_launches_kernel_and_honors_out():
+@pytest.mark.parametrize("circular", [False, True])
+def test_compute_slot_mappings_launches_kernel_and_honors_out(circular):
     tables = _make_uninitialized_tables()
+    if circular:
+        tables.is_circular = torch.tensor([False, True])
+        tables.cp_size = 1
     idx_mapping = torch.tensor([0, 1], dtype=torch.int32)
     query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
     positions = torch.zeros(6, dtype=torch.int64)
@@ -157,8 +164,10 @@ def test_compute_slot_mappings_launches_kernel_and_honors_out():
     assert kernel.__getitem__.call_count == 2
     kwargs = kernel.__getitem__.return_value.call_args.kwargs
     assert kwargs["PAD_ID"] == PAD_SLOT_ID
-    assert kwargs["CP_SIZE"] == 2
+    assert kwargs["CP_SIZE"] == tables.cp_size
     assert kwargs["CP_INTERLEAVE"] == 4
+    assert kwargs["HAS_CIRCULAR"] is circular
+    assert kwargs["is_circular_ptr"] is tables.is_circular
     if "USE_BLOCK_TABLE_STAGING" in kwargs:
         assert kwargs["USE_BLOCK_TABLE_STAGING"] is True
     if "BLOCK_TABLE_WINDOW_SIZE" in kwargs:

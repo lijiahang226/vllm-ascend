@@ -15,9 +15,9 @@ continues to use the existing Ascend Lightning Indexer path.
 - Each request owns one tail block. Historical position p is addressed with
   `tail_block_table[request, 0]` and offset `p % C`. Absolute positions never
   select additional block-table columns.
-- Tail writes use the same request block and modulo-C offset as historical
-  reads. The metadata builder supplies the request block table; no token-slot
-  mapping is needed for this ring.
+- The runner supplies circular `tail_slot_mapping = block_id * C + p % C`.
+  Normal, fused and draft mapping use the same address contract. Negative
+  slots are invalid. The metadata builder consumes this stable buffer.
 - Completed pool storage remains BF16 `[num_blocks, entries_per_block, 1, D]`.
   Its mapping is independent of tail mapping; incomplete pools have no output
   slot. APE remains FP32 `[R, D]` and uses pool offset, not ring offset.
@@ -43,8 +43,8 @@ there is no dependence on execution order between concurrent Triton programs.
 Tail writes apply to every real token, whether or not it completes a pool.
 `compute_topk=False` skips selection but still advances both caches. An empty
 batch returns without a launch. Padding rows beyond the final query end and
-negative positions or invalid block IDs do not write, even if a reused graph
-buffer contains positive positions in its padded region.
+negative positions/slots do not write, even if a reused graph buffer contains
+positive slot values in its padded region.
 
 ## Precision and lifecycle
 
