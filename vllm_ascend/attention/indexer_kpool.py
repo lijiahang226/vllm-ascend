@@ -252,7 +252,6 @@ class AscendIndexerKPoolTailMetadata:
     """Addressing required to update the compressor tail cache."""
 
     block_table: torch.Tensor
-    slot_mapping: torch.Tensor
     block_size: int
 
 
@@ -294,10 +293,8 @@ class AscendIndexerKPoolTailMetadataBuilder(AttentionMetadataBuilder):
     ) -> AscendIndexerKPoolTailMetadata:
         del common_prefix_len, fast_build, kwargs
         num_reqs = common_attn_metadata.num_reqs
-        num_input_tokens = common_attn_metadata.num_input_tokens
         return AscendIndexerKPoolTailMetadata(
             block_table=common_attn_metadata.block_table_tensor[:num_reqs],
-            slot_mapping=common_attn_metadata.slot_mapping[:num_input_tokens],
             block_size=self.block_size,
         )
 

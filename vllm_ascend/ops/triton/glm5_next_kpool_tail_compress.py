@@ -171,7 +171,7 @@ def _store_kpool_tail_kernel(
     k,
     gate,
     query_ends,
-    tail_slots,
+    tail_block_table,
     positions,
     num_tokens,
     tail_stride_b: tl.constexpr,
@@ -180,6 +180,7 @@ def _store_kpool_tail_kernel(
     tail_stride_d: tl.constexpr,
     k_stride_t: tl.constexpr,
     gate_stride_t: tl.constexpr,
+    tail_block_table_stride_req: tl.constexpr,
     NUM_BLOCKS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
@@ -194,10 +195,12 @@ def _store_kpool_tail_kernel(
     row = end - 1 - retained_offset
     row_valid = (row >= start) & (row >= 0) & (row < num_tokens)
     pos = tl.load(positions + row, mask=row_valid, other=-1)
-    slot = tl.load(tail_slots + row, mask=row_valid, other=-1).to(tl.int64)
-    valid = row_valid & (pos >= 0) & (slot >= 0) & (slot < NUM_BLOCKS * BLOCK_SIZE)
-    safe_slot = tl.where(valid, slot, 0)
-    block, offset = safe_slot // BLOCK_SIZE, safe_slot % BLOCK_SIZE
+    # Match the compressor's history reads: each request owns one ring,
+    # independent of token-position slot mappings supplied by the runner.
+    physical = tl.load(tail_block_table + req_id * tail_block_table_stride_req, mask=row_valid, other=-1).to(tl.int64)
+    valid = row_valid & (pos >= 0) & (physical >= 0) & (physical < NUM_BLOCKS)
+    block = tl.where(valid, physical, 0)
+    offset = tl.maximum(pos, 0) % BLOCK_SIZE
     dims = tl.program_id(1) * BLOCK_D + tl.arange(0, BLOCK_D)
     mask = valid & (dims < HEAD_DIM)
     key = tl.load(k + row * k_stride_t + dims, mask=mask, other=0)
@@ -216,7 +219,6 @@ def glm5_next_kpool_tail_compress_and_write_cache_triton(
     positions: torch.Tensor,
     cum_query_lens: torch.Tensor,
     seq_lens: torch.Tensor,
-    tail_slot_mapping: torch.Tensor,
     tail_block_table: torch.Tensor,
     indexer_slot_mapping: torch.Tensor,
     index_kpool: int,
@@ -253,8 +255,6 @@ def glm5_next_kpool_tail_compress_and_write_cache_triton(
         cum_query_lens = cum_query_lens.contiguous()
     if not seq_lens.is_contiguous():
         seq_lens = seq_lens.contiguous()
-    if not tail_slot_mapping.is_contiguous():
-        tail_slot_mapping = tail_slot_mapping.contiguous()
     if not indexer_slot_mapping.is_contiguous():
         indexer_slot_mapping = indexer_slot_mapping.contiguous()
 
@@ -300,7 +300,7 @@ def glm5_next_kpool_tail_compress_and_write_cache_triton(
         k,
         gate_score,
         cum_query_lens,
-        tail_slot_mapping,
+        tail_block_table,
         positions,
         num_tokens,
         tail_cache.stride(0),
@@ -309,6 +309,7 @@ def glm5_next_kpool_tail_compress_and_write_cache_triton(
         tail_cache.stride(3),
         k.stride(0),
         gate_score.stride(0),
+        tail_block_table.stride(0),
         tail_cache.shape[0],
         tail_cache.shape[2],
         head_dim,

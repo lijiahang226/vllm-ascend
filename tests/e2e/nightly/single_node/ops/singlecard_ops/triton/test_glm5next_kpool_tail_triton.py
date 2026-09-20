@@ -37,13 +37,12 @@ def test_tail_prefill_all_chunk_boundaries_decode_padding_and_graph(pool, capaci
 
     def run(lengths):
         nonlocal graph, captured
-        positions, input_k, input_g, tail_slots, output_slots = [], [], [], [], []
+        positions, input_k, input_g, output_slots = [], [], [], []
         for req, (start, length) in enumerate(zip(starts, lengths)):
             for pos in range(start, start + length):
                 positions.append(pos)
                 input_k.append(keys[req, pos])
                 input_g.append(gates[req, pos])
-                tail_slots.append(tail_ids[req] * capacity + pos % capacity)
                 slot = cache_ids[req] * 128 + pos // pool if (pos + 1) % pool == 0 else -1
                 output_slots.append(slot)
                 expected_tail[tail_ids[req], 0, pos % capacity, :dim] = keys[req, pos]
@@ -61,7 +60,7 @@ def test_tail_prefill_all_chunk_boundaries_decode_padding_and_graph(pool, capaci
         g = torch.zeros_like(k)
         if count:
             k[:count], g[:count] = torch.stack(input_k), torch.stack(input_g)
-        # Positive stale padding slots must never write into block zero.
+        # Stale padding positions and pool slots must never write into block zero.
         args = (
             tail,
             cache,
@@ -71,7 +70,6 @@ def test_tail_prefill_all_chunk_boundaries_decode_padding_and_graph(pool, capaci
             torch.tensor(positions + [0] * (token_capacity - count), device="npu"),
             ends.npu(),
             torch.tensor([s + n for s, n in zip(starts, lengths)], dtype=torch.int32).npu(),
-            torch.tensor(tail_slots + [0] * (token_capacity - count), device="npu"),
             torch.tensor([[i] for i in tail_ids], dtype=torch.int32).npu(),
             torch.tensor(output_slots + [0] * (token_capacity - count), device="npu"),
             pool,
@@ -121,7 +119,6 @@ def test_empty_compression_preserves_caches(empty):
         torch.zeros(count, dtype=torch.int64, device="npu"),
         ends,
         ends,
-        torch.full((count,), -1, device="npu"),
         torch.zeros(1, 1, dtype=torch.int32, device="npu"),
         torch.full((count,), -1, device="npu"),
         4,
@@ -147,7 +144,6 @@ def test_invalid_tail_layout_raises(shape):
             slots,
             ends,
             ends,
-            slots,
             torch.zeros(1, 1, dtype=torch.int32, device="npu"),
             slots,
             4,

@@ -94,7 +94,6 @@ def _indexer_metadata(num_tokens: int = 8) -> AscendIndexerKPoolMetadata:
 def _tail_metadata() -> AscendIndexerKPoolTailMetadata:
     return AscendIndexerKPoolTailMetadata(
         block_table=torch.tensor([[0], [1]], dtype=torch.int32),
-        slot_mapping=torch.full((8,), -1, dtype=torch.int64),
         block_size=4,
     )
 
@@ -103,11 +102,10 @@ def _tail_metadata() -> AscendIndexerKPoolTailMetadata:
 def test_triton_indexer_updates_both_caches_and_masks_padding(monkeypatch, compute_topk):
     metadata = _indexer_metadata(num_tokens=10)
     tail_metadata = _tail_metadata()
-    tail_metadata.slot_mapping = torch.arange(10)
     indexer_cache = torch.zeros(2, 2, 1, 2, dtype=torch.bfloat16)
     tail_cache = torch.zeros(2, 2, 4, 2)
 
-    def compress(state, cache, k, gate, ape, positions, query_ends, seq_lens, state_slots, table, indexer_slots, pool):
+    def compress(state, cache, k, gate, ape, positions, query_ends, seq_lens, table, indexer_slots, pool):
         assert k.dtype == gate.dtype == state.dtype == torch.float32
         assert pool == 4
         torch.testing.assert_close(query_ends, metadata.cum_query_lens)
