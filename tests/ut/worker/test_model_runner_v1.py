@@ -791,7 +791,12 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
         # Reorder surviving requests, insert a new request and retain a zero
         # count from a discarded output. The old snapshot must not be clobbered.
         runner.prev_positions.np[:4] = [2, -1, 0, 1]
-        positions = runner._prepare_num_accepted_tokens(4, True, None)
+        with (
+            patch("torch.npu.current_stream") as current_stream,
+            patch("vllm_ascend.worker.model_runner_v1.global_stream") as producer_stream,
+        ):
+            positions = runner._prepare_num_accepted_tokens(4, True, None)
+            current_stream.return_value.wait_stream.assert_called_once_with(producer_stream.return_value)
         torch.testing.assert_close(positions, torch.tensor([2, -1, 0, 1], dtype=torch.int32))
         torch.testing.assert_close(runner.num_accepted_tokens.gpu[:4], torch.tensor([2, 1, 3, 0], dtype=torch.int32))
         self.assertTrue(torch.all(runner.num_accepted_tokens.gpu[4:] == 1))
@@ -799,7 +804,12 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
         np.testing.assert_array_equal(runner.input_batch.num_accepted_tokens_cpu, np.ones(12))
 
         # A batch with no surviving requests starts from the initial state.
-        runner._prepare_num_accepted_tokens(2, False, None)
+        with (
+            patch("torch.npu.current_stream") as current_stream,
+            patch("vllm_ascend.worker.model_runner_v1.global_stream") as producer_stream,
+        ):
+            runner._prepare_num_accepted_tokens(2, False, None)
+            current_stream.return_value.wait_stream.assert_called_once_with(producer_stream.return_value)
         self.assertTrue(torch.all(runner.num_accepted_tokens.gpu == 1))
 
     def test_snapshot_survives_request_replacement_and_backend_reorder(self):

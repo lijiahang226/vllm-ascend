@@ -1024,6 +1024,10 @@ class NPUModelRunner(GPUModelRunner):
         prev_positions_gpu: torch.Tensor | None,
     ) -> torch.Tensor | None:
         if self._use_device_accepted_tokens:
+            # Postprocessing writes the snapshot on global_stream(). Order the
+            # device consumer after it without blocking the host, even when
+            # every previous request has left and the buffer is reset below.
+            torch.npu.current_stream().wait_stream(global_stream())
             accepted = self.num_accepted_tokens.gpu
             if has_prev_mapping:
                 if prev_positions_gpu is None:
