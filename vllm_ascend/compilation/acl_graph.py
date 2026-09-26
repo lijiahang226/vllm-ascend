@@ -61,6 +61,7 @@ class ACLGraphEntry:
     # for aclgraph debugging, track the input addresses
     # during capture, and check if they are the same during replay
     input_addresses: list[int] | None = None
+    requires_attn_params_update: bool = True
 
 
 class ACLGraphWrapper:
@@ -264,6 +265,12 @@ class ACLGraphWrapper:
             # to save memory
             entry.output = weak_ref_tensors(output)
             entry.aclgraph = aclgraph
+            # Inspect captured tasks instead of model flags: hybrid models can
+            # select a different backend for each layer. Draft and breakable
+            # graphs retain their existing synchronization policy.
+            if self.runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.is_draft_model:
+                handles = _graph_params.handles.get(batch_descriptor.num_tokens) if _graph_params is not None else None
+                entry.requires_attn_params_update = bool(aclgraph.tasks) or handles is None or bool(handles)
 
             compilation_counter.num_cudagraph_captured += 1
 
@@ -291,7 +298,9 @@ class ACLGraphWrapper:
         # When enable_enpu is on, model_runner orders update vs replay; skip here.
         # When FULL + EAGLE draft (merge path), replay does not need this barrier.
         is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
-        need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
+        # Tensor-only metadata is copied on the replay stream. Without host
+        # attention-task updates, stream ordering provides the dependency.
+        need_sync = self.runtime_mode == CUDAGraphMode.FULL and entry.requires_attn_params_update and not is_draft_eagle
         if not self.enable_enpu and need_sync:
             torch.npu.current_stream().synchronize()
         if self.runtime_mode == CUDAGraphMode.FULL and use_updatable_graph(self.attn_backend):

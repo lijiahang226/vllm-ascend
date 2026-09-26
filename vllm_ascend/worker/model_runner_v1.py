@@ -953,10 +953,14 @@ class NPUModelRunner(GPUModelRunner):
             return
 
         # InputBatch can be condensed/reordered before the next input preparation.
-        # Keep the asynchronous D2H result in the previous iteration's row order,
-        # independently of InputBatch, until the existing event is synchronized.
+        # Keep accepted counts in the previous iteration's row order,
+        # independently of InputBatch, until the next input preparation.
         num_reqs = output_token_ids.size(0)
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
+        if self._use_device_accepted_tokens:
+            # No host state copies consume these counts in "none" mode.
+            # Keep the snapshot on device until the next batch is reordered.
+            return
         if self.cache_config.mamba_cache_mode == "align":
             mamba_utils.postprocess_mamba_align_gpu(
                 bufs=self._get_mamba_bufs(),
@@ -1004,6 +1008,43 @@ class NPUModelRunner(GPUModelRunner):
         else:
             accepted[:num_reqs].fill(1)
         self.input_batch.num_accepted_tokens_cpu[:num_reqs] = accepted[:num_reqs]
+
+    @property
+    def _use_device_accepted_tokens(self) -> bool:
+        return (
+            self.use_async_spec_decode
+            and self.model_config.is_hybrid
+            and self.cache_config.mamba_cache_mode == "none"
+        )
+
+    def _prepare_num_accepted_tokens(
+        self,
+        num_reqs: int,
+        has_prev_mapping: bool,
+        prev_positions_gpu: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        if self._use_device_accepted_tokens:
+            accepted = self.num_accepted_tokens.gpu
+            if has_prev_mapping:
+                if prev_positions_gpu is None:
+                    self.prev_positions.copy_to_gpu(num_reqs)
+                    prev_positions_gpu = self.prev_positions.gpu[:num_reqs]
+                # Gather before overwriting the snapshot, including zero counts
+                # for discarded outputs. Only new requests start with one.
+                previous = accepted[prev_positions_gpu.clamp(min=0)]
+                accepted[:num_reqs].copy_(torch.where(prev_positions_gpu >= 0, previous, 1))
+            else:
+                accepted[:num_reqs].fill_(1)
+            accepted[num_reqs:].fill_(1)
+        elif self.num_accepted_tokens_event is not None:
+            self.num_accepted_tokens_event.synchronize()
+            self._sync_num_accepted_tokens(num_reqs, has_prev_mapping)
+            self.num_accepted_tokens.np[num_reqs:].fill(1)
+            self.num_accepted_tokens.copy_to_gpu()
+        else:
+            self.num_accepted_tokens.np.fill(1)
+            self.num_accepted_tokens.gpu.fill_(1)
+        return prev_positions_gpu
 
     def _pad_query_start_loc_for_fia(
         self,
@@ -1435,18 +1476,9 @@ class NPUModelRunner(GPUModelRunner):
         self.discard_request_mask.np[:num_reqs] = discard_requests_mask
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
-        # Sync num_accepted_tokens from CPU (set by
-        # _update_states_after_model_execute for hybrid models).
-        if self.num_accepted_tokens_event is not None:
-            self.num_accepted_tokens_event.synchronize()
-            self._sync_num_accepted_tokens(
-                num_reqs, has_prev_mapping=bool(prev_req_id_to_index)
-            )
-            self.num_accepted_tokens.np[num_reqs:].fill(1)
-            self.num_accepted_tokens.copy_to_gpu()
-        else:
-            self.num_accepted_tokens.np.fill(1)
-            self.num_accepted_tokens.gpu.fill_(1)
+        prev_positions_gpu = self._prepare_num_accepted_tokens(
+            num_reqs, bool(prev_req_id_to_index), prev_positions_gpu
+        )
 
         # Update num_computed_tokens on GPU. In async spec decode,
         # CPU values are optimistic (all drafts accepted). The kernel
@@ -5894,6 +5926,15 @@ class NPUModelRunner(GPUModelRunner):
 
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
+
+        # A hybrid model's runner-level backend can differ from its layers
+        # (GLM-Next selects MLA globally but SFA for its attention layers).
+        # Wait for corrected host lengths only when an actual consumer needs them.
+        self._needs_seq_lens_cpu_sync = self.use_compress or any(
+            issubclass(backend, (AscendAttentionBackend, AscendMLABackend))
+            for backends in attention_backend_list
+            for backend in backends
+        )
 
         device_metadata_providers = {
             id(builder): builder

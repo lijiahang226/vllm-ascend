@@ -763,6 +763,7 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.use_async_scheduling = True
+        runner.use_async_spec_decode = False
         runner.speculative_config = object()
         runner.model_config = SimpleNamespace(is_hybrid=True)
         runner.cache_config = SimpleNamespace(mamba_cache_mode="align")
@@ -776,6 +777,30 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
         )
         runner.num_accepted_tokens_event = MagicMock()
         return runner
+
+    def test_none_mode_keeps_async_counts_on_device_across_batch_changes(self):
+        runner = self._build_runner()
+        runner.use_async_spec_decode = True
+        runner.cache_config.mamba_cache_mode = "none"
+        output_ids = torch.tensor([[10, 11, 12], [-1, -1, -1], [20, 21, -1]])
+        with patch.object(runner.num_accepted_tokens, "copy_to_cpu") as copy_to_cpu:
+            runner._update_states_after_model_execute(output_ids, SimpleNamespace())
+            copy_to_cpu.assert_not_called()
+        runner.num_accepted_tokens_event.record.assert_not_called()
+
+        # Reorder surviving requests, insert a new request and retain a zero
+        # count from a discarded output. The old snapshot must not be clobbered.
+        runner.prev_positions.np[:4] = [2, -1, 0, 1]
+        positions = runner._prepare_num_accepted_tokens(4, True, None)
+        torch.testing.assert_close(positions, torch.tensor([2, -1, 0, 1], dtype=torch.int32))
+        torch.testing.assert_close(runner.num_accepted_tokens.gpu[:4], torch.tensor([2, 1, 3, 0], dtype=torch.int32))
+        self.assertTrue(torch.all(runner.num_accepted_tokens.gpu[4:] == 1))
+        runner.num_accepted_tokens_event.synchronize.assert_not_called()
+        np.testing.assert_array_equal(runner.input_batch.num_accepted_tokens_cpu, np.ones(12))
+
+        # A batch with no surviving requests starts from the initial state.
+        runner._prepare_num_accepted_tokens(2, False, None)
+        self.assertTrue(torch.all(runner.num_accepted_tokens.gpu == 1))
 
     def test_snapshot_survives_request_replacement_and_backend_reorder(self):
         runner = self._build_runner()
@@ -1201,6 +1226,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         runner = self._build_runner()
         runner.attn_groups = []
+        runner.use_compress = False
         runner._check_and_update_cudagraph_mode = MagicMock()
         runner.calculate_reorder_batch_threshold = MagicMock()
 
@@ -1259,6 +1285,18 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             {tuple(group.layer_names) for group in runner.attn_groups[0]},
             {(target_layer,), (draft_layer,), (cache_layer,)},
         )
+        self.assertTrue(runner._needs_seq_lens_cpu_sync)
+
+        # The runner's MLA default must not force a host-count wait when the
+        # actual layers all consume device metadata, as in GLM-Next.
+        runner.attn_backend = AscendMLABackend
+        target_attn.get_attn_backend.return_value = FakeCacheBackend
+        draft_attn.get_attn_backend.return_value = FakeCacheBackend
+        for use_compress in (False, True):
+            runner.attn_groups = []
+            runner.use_compress = use_compress
+            runner.initialize_attn_backend(kv_cache_config)
+            self.assertEqual(runner._needs_seq_lens_cpu_sync, use_compress)
 
     def test_cp_or_sp_decode_dispatch_keys_are_actually_captured(self):
         cases = (

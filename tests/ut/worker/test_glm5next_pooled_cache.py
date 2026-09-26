@@ -232,6 +232,10 @@ def test_glm5_next_runner_allocates_contiguous_slot_backings():
     assert torch.all(slot[slot.numel() - block2_els :].view(torch.float32) == 7)
     assert torch.count_nonzero(slot[: slot.numel() - tail_packed_els]) == 0
     assert torch.count_nonzero(slot[slot.numel() - tail_packed_els : slot.numel() - block2_els]) == 0
+    indexer_cache.fill_(3)
+    tail_cache.fill_(7)
+    assert torch.all(indexer_cache == 3)
+    assert torch.all(tail_cache == 7)
 
 
 def test_glm5_next_runner_splits_main_mla_components_within_each_page():

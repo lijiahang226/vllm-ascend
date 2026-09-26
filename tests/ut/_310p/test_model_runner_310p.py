@@ -36,6 +36,11 @@ def _prepare_inputs_source() -> str:
 
 
 def test_prepare_inputs_keeps_aclgraph_metadata_on_cpu() -> None:
+    runner = NPUModelRunner310.__new__(NPUModelRunner310)
+    runner.use_async_spec_decode = True
+    runner.model_config = SimpleNamespace(is_hybrid=True)
+    runner.cache_config = SimpleNamespace(mamba_cache_mode="none")
+    assert not runner._use_device_accepted_tokens
     source = _prepare_inputs_source()
 
     assert "block_table.compute_slot_mapping(" in source

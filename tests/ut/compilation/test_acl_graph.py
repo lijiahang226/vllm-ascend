@@ -14,6 +14,7 @@
 #
 import contextlib
 import weakref
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
@@ -471,6 +472,7 @@ class TestACLGraphWrapper(TestBase):
         # Reset mock to track second call
         self.mock_runnable.reset_mock()
         mock_npu_graph.reset_mock()
+        mock_torch.npu.current_stream.return_value.reset_mock()
 
         # Second call should replay the graph
         second_result = wrapper(test_tensor, "arg2")
@@ -480,10 +482,51 @@ class TestACLGraphWrapper(TestBase):
 
         # Verify graph replay happened
         mock_npu_graph.replay.assert_called_once()
+        mock_torch.npu.current_stream.return_value.synchronize.assert_called_once()
 
         # Both calls should return the weak ref output
         self.assertEqual(first_result, "test_output")  # Original output
         self.assertEqual(second_result, "weak_ref_output")  # Weak ref output
+
+    def test_replay_wait_depends_on_captured_update_tasks(self):
+        empty = GraphParams(events={}, workspaces={}, handles={30: []}, attn_params={})
+        legacy = GraphParams(events={}, workspaces={}, handles={30: [object()]}, attn_params={})
+        missing = GraphParams(events={}, workspaces={}, handles={}, attn_params={})
+        cases = [
+            ("tensor metadata", empty, [], False, False),
+            ("legacy updates", legacy, [], False, True),
+            ("updatable graph", empty, [object()], False, True),
+            ("unknown shape", missing, [], False, True),
+            ("uninitialized params", None, [], False, True),
+            ("draft graph", empty, [], True, True),
+        ]
+        for name, params, tasks, is_draft, needs_wait in cases:
+            with self.subTest(name=name), contextlib.ExitStack() as stack:
+                graph = MagicMock(tasks=tasks)
+                self.mock_updatable_graph.return_value = graph
+                stack.enter_context(patch.object(acl_graph, "_graph_params", params))
+                stack.enter_context(patch.object(acl_graph, "_EXTRA_CTX", SimpleNamespace(is_draft_model=is_draft)))
+                stack.enter_context(
+                    patch.object(acl_graph, "get_forward_context", return_value=self.mock_forward_context)
+                )
+                stack.enter_context(patch.object(acl_graph, "validate_cudagraph_capturing_enabled"))
+                stack.enter_context(patch.object(acl_graph, "current_platform"))
+                stack.enter_context(patch.object(acl_graph, "weak_ref_tensors", side_effect=lambda value: value))
+                stack.enter_context(patch("torch.npu.graph"))
+                stream = stack.enter_context(patch("torch.npu.current_stream"))
+                wrapper = ACLGraphWrapper(
+                    self.mock_runnable,
+                    self.mock_vllm_config,
+                    CUDAGraphMode.FULL,
+                    cudagraph_options=self.mock_cudagraph_options,
+                )
+                tensor = torch.tensor([1, 2, 3])
+                captured = wrapper(tensor)
+                stream.return_value.reset_mock()
+                replayed = wrapper(tensor)
+                self.assertIs(replayed, captured)
+                graph.replay.assert_called_once()
+                self.assertEqual(stream.return_value.synchronize.call_count, int(needs_wait))
 
     @patch("vllm_ascend.compilation.acl_graph.torch")
     @patch("vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled")

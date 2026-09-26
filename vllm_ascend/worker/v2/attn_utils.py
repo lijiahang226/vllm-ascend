@@ -202,7 +202,8 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
 
         kv_cache_spec[layer_name] = spec
         if isinstance(spec, AttentionSpec):
-            attention_layer_names.append(layer_name)
+            if getattr(attn_module, "align_kv_cache_with_mamba", True):
+                attention_layer_names.append(layer_name)
             continue
 
     if mamba_specs:

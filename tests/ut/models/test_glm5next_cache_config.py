@@ -104,6 +104,15 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
     ]
     assert len(groups) == 5  # full, state, and three interleaved KDA groups
     assert layout.main_slot_count == layout.small_slot_count == 1
+    indexer = specs["model.layers.3.indexer.k_cache"]
+    tail = specs["model.layers.3.indexer.tail_cache"]
+    assert layout.small_page_size == 2 * max(indexer.real_page_size_bytes, tail.unpadded_page_size_bytes)
+    assert layout.small_page_size < layout.main_page_size
+
+    # Repeated planning must not double an already padded small page.
+    replanned = _get_glm5_next_cache_layout(get_glm5_next_kv_cache_groups(config, specs))
+    assert replanned is not None
+    assert replanned.small_page_size == layout.small_page_size
 
     bytes_per_block = layout.main_page_size + layout.small_page_size
     budget = 20 * bytes_per_block
@@ -155,6 +164,57 @@ def test_standalone_mtp_layout_has_no_mamba_groups():
     assert len(groups) == 2
     assert layout is not None
     assert layout.mamba_groups == ()
+
+
+def test_one_million_context_with_mtp_fits_separate_small_pages():
+    config = make_config()
+    config.model_config.max_model_len = 1048576
+    specs = {}
+    for layer in range(46):
+        if layer % 4 == 3 or layer == 45:
+            specs[f"model.layers.{layer}.attn"] = MLAAttentionSpec(
+                block_size=4480,
+                num_kv_heads=1,
+                head_size=512,
+                dtype=torch.bfloat16,
+                model_version="glm5_next",
+            )
+            specs[f"model.layers.{layer}.indexer"] = MLAAttentionSpec(
+                block_size=4480,
+                num_kv_heads=1,
+                head_size=128,
+                dtype=torch.bfloat16,
+                model_version="glm5_next",
+                **_ratio_kwargs(4),
+            )
+            specs[f"model.layers.{layer}.tail"] = AscendIndexerKPoolTailSpec(
+                block_size=7,
+                sliding_window=4,
+                compress_ratio=4,
+                num_kv_heads=1,
+                head_size=128,
+                dtype=torch.float32,
+                model_version="glm5_next",
+                indexes_kv_by_block_stride=True,
+            )
+        else:
+            specs[f"model.layers.{layer}.linear_attn"] = MambaSpec(
+                block_size=1048576,
+                shapes=((6, 24576), (64, 128, 128)),
+                dtypes=(torch.bfloat16, torch.float32),
+                num_speculative_blocks=3,
+            )
+
+    groups = get_glm5_next_kv_cache_groups(config, specs)
+    required = get_glm5_next_max_memory_usage(config, groups)
+    budget = 18 * 1024**3
+    plan = get_glm5_next_kv_cache_config(config, groups, budget)
+
+    assert get_glm5_next_pool_bytes_per_block(groups) == 12 * (4587520 + 573440)
+    assert required == 248 * 12 * (4587520 + 573440)
+    assert required < budget
+    assert plan.num_blocks >= 248
+    assert sum(tensor.size for tensor in plan.kv_cache_tensors) <= budget
 
 
 def test_pipeline_projection_supports_a_mamba_only_worker():

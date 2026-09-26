@@ -13,6 +13,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
@@ -981,6 +982,42 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
         tokens_per_state=1,
     )
     return layer
+
+
+@pytest.mark.parametrize("align_with_mamba", [True, False])
+def test_cache_spec_respects_layer_page_alignment(monkeypatch, align_with_mamba):
+    attention = AscendMLAAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=4,
+        dtype=torch.bfloat16,
+    )
+    recurrent = MambaSpec(
+        block_size=16,
+        shapes=((2, 16), (1, 16, 16)),
+        dtypes=(torch.bfloat16, torch.float32),
+    )
+    layers = {
+        "attention": SimpleNamespace(
+            get_kv_cache_spec=lambda _: attention,
+            align_kv_cache_with_mamba=align_with_mamba,
+        ),
+        "recurrent": SimpleNamespace(get_kv_cache_spec=lambda _: recurrent),
+    }
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        attention_config=SimpleNamespace(indexer_kv_dtype="auto"),
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+    )
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: layers)
+    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _: False)
+
+    specs = attn_utils.get_kv_cache_spec(config)
+
+    expected_page = recurrent.page_size_bytes if align_with_mamba else attention.page_size_bytes
+    assert specs["attention"].page_size_bytes == expected_page
+    assert specs["recurrent"].page_size_bytes == recurrent.page_size_bytes
 
 
 def test_sfa_indexer_allocates_and_reshapes_scale_views(monkeypatch):

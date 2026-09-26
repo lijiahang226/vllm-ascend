@@ -87,6 +87,11 @@ class NPUModelRunner310(NPUModelRunner):
     uniform_decode_query_len: int
     _spec_dummy_capture: bool = False
 
+    @property
+    def _use_device_accepted_tokens(self) -> bool:
+        # The 310P input-preparation path still consumes the CPU snapshot.
+        return False
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.input_batch = NPUInputBatch(
