@@ -529,7 +529,13 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     )
     # vLLM main (#54736) added allow_partial_hash_hits.
     hybrid_kwargs["allow_partial_hash_hits"] = allow_partial_hash_hits
-    if _is_deepseek_v4_kv_cache_config(kv_cache_config):
+    # In mixed layouts, private tail/state blocks are not scheduling units.
+    # Match the resolver's filtering even without prefix caching; all-private
+    # layouts still use the upstream coordinator and its normal LCM rules.
+    num_cacheable_groups = sum(is_prefix_cacheable(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups)
+    if _is_deepseek_v4_kv_cache_config(kv_cache_config) or 0 < num_cacheable_groups < len(
+        kv_cache_config.kv_cache_groups
+    ):
         return AscendHybridKVCacheCoordinator(**hybrid_kwargs)  # type: ignore[call-arg]
 
     if len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:

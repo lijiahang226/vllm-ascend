@@ -50,6 +50,49 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 
 
+@pytest.mark.parametrize("with_full_attention", [True, False])
+def test_private_tail_without_prefix_caching_uses_independent_block_sizes(with_full_attention):
+    from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
+
+    register_all_kvcache_specs(None)
+    register_ascend_kv_cache_specs()
+    full = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
+    tail = AscendIndexerKPoolTailSpec(
+        block_size=7, sliding_window=4, compress_ratio=4, num_kv_heads=1, head_size=8, dtype=torch.float32
+    )
+    groups = [KVCacheGroupSpec(["tail"], tail)]
+    if with_full_attention:
+        groups.insert(0, KVCacheGroupSpec(["full"], full))
+    cfg = KVCacheConfig(num_blocks=32, kv_cache_tensors=[], kv_cache_groups=groups)
+    scheduler_size, hash_size = _ascend_resolve_kv_cache_block_sizes(
+        cfg,
+        SimpleNamespace(
+            cache_config=SimpleNamespace(enable_prefix_caching=False, block_size=16),
+            parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        ),
+    )
+    assert scheduler_size == hash_size == (16 if with_full_attention else 7)
+    coordinator = get_kv_cache_coordinator(
+        cfg,
+        max_model_len=64,
+        use_eagle=True,
+        enable_caching=False,
+        scheduler_block_size=scheduler_size,
+        hash_block_size=hash_size,
+    )
+    assert isinstance(coordinator, AscendHybridKVCacheCoordinator) is with_full_attention
+    assert isinstance(coordinator.single_type_managers[-1], KpoolTailManager)
+    free_blocks = coordinator.block_pool.get_num_free_blocks()
+    for manager in coordinator.single_type_managers:
+        manager.allocate_new_blocks("request", 16, 16)
+        assert manager.req_to_blocks["request"]
+        assert all(block.block_hash is None for block in manager.req_to_blocks["request"])
+    for manager in coordinator.single_type_managers:
+        manager.free("request")
+        assert not manager.req_to_blocks.get("request")
+    assert coordinator.block_pool.get_num_free_blocks() == free_blocks
+
+
 @pytest.mark.parametrize("wrapped", [False, True])
 @pytest.mark.parametrize("scheduler_size", [16, 32])
 def test_real_tail_coordinator_preserves_prefix_hit_and_private_lifecycle(wrapped, scheduler_size):
