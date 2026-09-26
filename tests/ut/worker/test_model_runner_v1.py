@@ -776,6 +776,8 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
             num_accepted_tokens_cpu_tensor=batch_counts,
         )
         runner.num_accepted_tokens_event = MagicMock()
+        runner.valid_sampled_token_count_gpu = None
+        runner.arange_np = np.arange(12, dtype=np.int32)
         return runner
 
     def test_none_mode_keeps_async_counts_on_device_across_batch_changes(self):
@@ -796,7 +798,8 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
             patch("vllm_ascend.worker.model_runner_v1.global_stream") as producer_stream,
         ):
             positions = runner._prepare_num_accepted_tokens(4, True, None)
-            current_stream.return_value.wait_stream.assert_called_once_with(producer_stream.return_value)
+            current_stream.assert_not_called()
+            producer_stream.assert_not_called()
         torch.testing.assert_close(positions, torch.tensor([2, -1, 0, 1], dtype=torch.int32))
         torch.testing.assert_close(runner.num_accepted_tokens.gpu[:4], torch.tensor([2, 1, 3, 0], dtype=torch.int32))
         self.assertTrue(torch.all(runner.num_accepted_tokens.gpu[4:] == 1))
@@ -809,8 +812,33 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
             patch("vllm_ascend.worker.model_runner_v1.global_stream") as producer_stream,
         ):
             runner._prepare_num_accepted_tokens(2, False, None)
-            current_stream.return_value.wait_stream.assert_called_once_with(producer_stream.return_value)
+            current_stream.assert_not_called()
+            producer_stream.assert_not_called()
         self.assertTrue(torch.all(runner.num_accepted_tokens.gpu == 1))
+
+    def test_padded_counts_reuse_and_identity_batch(self):
+        runner = self._build_runner()
+        runner.use_async_spec_decode = True
+        runner.cache_config.mamba_cache_mode = "none"
+        # The padded proposer masks a discarded row even when raw sampling
+        # produced a token for it. That request has no surviving row mapping.
+        runner.valid_sampled_token_count_gpu = torch.tensor([2, 0, 3])
+        runner._update_states_after_model_execute(
+            torch.tensor([[10, 11, -1], [20, -1, -1], [30, 31, 32]]), SimpleNamespace()
+        )
+        runner.prev_positions.np[:3] = [0, -1, 2]
+        runner._prepare_num_accepted_tokens(3, True, None)
+        torch.testing.assert_close(runner.num_accepted_tokens.gpu[:3], torch.tensor([2, 1, 3], dtype=torch.int32))
+
+        # The next batch retains exactly the same rows. No GPU gather indices
+        # are needed here; the caller still uploads them for computed counts.
+        runner.prev_positions.np[:3] = [0, 1, 2]
+        runner.num_accepted_tokens.gpu[3:] = 4
+        with patch.object(runner.prev_positions, "copy_to_gpu") as copy_positions:
+            self.assertIsNone(runner._prepare_num_accepted_tokens(3, True, None))
+            copy_positions.assert_not_called()
+        torch.testing.assert_close(runner.num_accepted_tokens.gpu[:3], torch.tensor([2, 1, 3], dtype=torch.int32))
+        self.assertTrue(torch.all(runner.num_accepted_tokens.gpu[3:] == 1))
 
     def test_snapshot_survives_request_replacement_and_backend_reorder(self):
         runner = self._build_runner()

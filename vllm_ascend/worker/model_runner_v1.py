@@ -956,11 +956,16 @@ class NPUModelRunner(GPUModelRunner):
         # Keep accepted counts in the previous iteration's row order,
         # independently of InputBatch, until the next input preparation.
         num_reqs = output_token_ids.size(0)
-        self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
         if self._use_device_accepted_tokens:
-            # No host state copies consume these counts in "none" mode.
-            # Keep the snapshot on device until the next batch is reordered.
+            # sample_tokens clears this before drafting, so a non-None tensor
+            # belongs to this step. Reuse padded-drafter counts instead of
+            # reducing sampled tokens again after the draft model finishes.
+            counts = self.valid_sampled_token_count_gpu
+            if counts is None:
+                counts = (output_token_ids != -1).sum(dim=1)
+            self.num_accepted_tokens.gpu[:num_reqs].copy_(counts)
             return
+        self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
         if self.cache_config.mamba_cache_mode == "align":
             mamba_utils.postprocess_mamba_align_gpu(
                 bufs=self._get_mamba_bufs(),
@@ -1024,19 +1029,19 @@ class NPUModelRunner(GPUModelRunner):
         prev_positions_gpu: torch.Tensor | None,
     ) -> torch.Tensor | None:
         if self._use_device_accepted_tokens:
-            # Postprocessing writes the snapshot on global_stream(). Order the
-            # device consumer after it without blocking the host, even when
-            # every previous request has left and the buffer is reset below.
-            torch.npu.current_stream().wait_stream(global_stream())
+            # Device-only postprocessing runs on the same execution stream as
+            # this consumer. CPU state-copy modes retain the side-stream path.
             accepted = self.num_accepted_tokens.gpu
             if has_prev_mapping:
-                if prev_positions_gpu is None:
-                    self.prev_positions.copy_to_gpu(num_reqs)
-                    prev_positions_gpu = self.prev_positions.gpu[:num_reqs]
-                # Gather before overwriting the snapshot, including zero counts
-                # for discarded outputs. Only new requests start with one.
-                previous = accepted[prev_positions_gpu.clamp(min=0)]
-                accepted[:num_reqs].copy_(torch.where(prev_positions_gpu >= 0, previous, 1))
+                # Steady decode commonly keeps the same request rows. Avoid
+                # launching a gather and mask just to copy those rows back.
+                if not np.array_equal(self.prev_positions.np[:num_reqs], self.arange_np[:num_reqs]):
+                    if prev_positions_gpu is None:
+                        self.prev_positions.copy_to_gpu(num_reqs)
+                        prev_positions_gpu = self.prev_positions.gpu[:num_reqs]
+                    # Gather before overwriting, preserving discarded zeros.
+                    previous = accepted[prev_positions_gpu.clamp(min=0)]
+                    accepted[:num_reqs].copy_(torch.where(prev_positions_gpu >= 0, previous, 1))
             else:
                 accepted[:num_reqs].fill_(1)
             accepted[num_reqs:].fill_(1)
@@ -2794,7 +2799,7 @@ class NPUModelRunner(GPUModelRunner):
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
-        if self.need_accepted_tokens:
+        if self.need_accepted_tokens and not self._use_device_accepted_tokens:
             if self.sampling_done_event is None:
                 self.sampling_done_event = torch.npu.Event()
 
@@ -2925,13 +2930,14 @@ class NPUModelRunner(GPUModelRunner):
         self._finalize_dump_data()
 
         if self.need_accepted_tokens:
-            assert self.sampling_done_event is not None
-            with (
-                record_function_or_nullcontext("async_state_update"),
-                torch.npu.stream(global_stream()),
-            ):
-                global_stream().wait_event(self.sampling_done_event)
-                self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
+            with record_function_or_nullcontext("async_state_update"):
+                if self._use_device_accepted_tokens:
+                    self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
+                else:
+                    assert self.sampling_done_event is not None
+                    with torch.npu.stream(global_stream()):
+                        global_stream().wait_event(self.sampling_done_event)
+                        self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
 
         if not self.use_async_scheduling:
             if self.routed_experts_initialized:
