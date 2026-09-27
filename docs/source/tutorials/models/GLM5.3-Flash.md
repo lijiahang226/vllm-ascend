@@ -351,6 +351,69 @@ Only the key parameters specific to this model/scenario are described below. `ma
 - `--data-parallel-rpc-port 12321`: RPC port for data parallel master communication. Must be the same across all nodes.
 - `--headless`: Indicates a non-master node (used on node 1). Do not use on node 0.
 
+### 5.3 DP16 / EP16 with MTP5 for Short Text Requests
+
+This configuration targets a single Atlas 800 A3 node with 16 logical NPUs,
+TP1, 3500 input tokens, 1500 output tokens, and six concurrent requests per
+DP rank (96 in total). It combines asynchronous scheduling, decode graphs,
+MTP5, and the existing prefill MC2 communication path.
+
+```shell
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export VLLM_USE_V2_MODEL_RUNNER=0
+export VLLM_USE_BREAKABLE_CUDAGRAPH=0
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export HCCL_OP_EXPANSION_MODE=AIV
+export HCCL_BUFFSIZE=3072
+export OMP_NUM_THREADS=1
+export LCCL_DETERMINISTIC=1
+export HCCL_DETERMINISTIC=true
+export ATB_MATMUL_SHUFFLE_K_ENABLE=0
+export CLOSE_MATMUL_K_SHIFT=1
+
+vllm serve /mnt/weight/GLM-5.3-Flash-w8a8 \
+  --served-model-name glm53-flash \
+  --host 127.0.0.1 --port 8171 \
+  --api-server-count 16 \
+  --trust-remote-code --language-model-only \
+  --quantization ascend --dtype bfloat16 --seed 1024 \
+  --tensor-parallel-size 1 \
+  --data-parallel-size 16 --data-parallel-size-local 16 \
+  --data-parallel-address 127.0.0.1 --data-parallel-rpc-port 29671 \
+  --data-parallel-backend mp --enable-expert-parallel \
+  --max-model-len 5120 --max-num-seqs 6 \
+  --max-num-batched-tokens 512 --enable-chunked-prefill \
+  --gpu-memory-utilization 0.96 --num-gpu-blocks-override 160 \
+  --async-scheduling --no-enable-prefix-caching \
+  --additional-config '{"enable_prefill_mc2":true}' \
+  --speculative-config '{"method":"mtp","num_speculative_tokens":5}' \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[6,12,24,36]}'
+```
+
+- `enable_prefill_mc2` reserves communication capacity for prefill batches.
+  At TP1, the 512-token batch limit keeps these batches on MC2, avoiding the
+  AllToAllV preprocessing path that waits for routing counts on the CPU.
+  Keep DP coordination enabled: expert communication still involves all ranks.
+- `HCCL_BUFFSIZE=3072` provides the communication buffer needed by this model
+  at EP16 and 512 tokens per rank. A 1024 MB buffer fails startup in this
+  configuration; the runtime reports a requirement of approximately 2513 MB.
+- `--num-gpu-blocks-override 160` is specific to this short-context workload.
+  The recurrent-state cache uses strided page views, and its current prefill
+  gather/scatter path can materialize the whole physical pool. Reserving more
+  unused blocks can therefore increase prefill work. Smaller indexer/tail pages
+  improve memory capacity but do not by themselves guarantee higher throughput.
+  Recheck capacity and preemptions when changing context length, concurrency,
+  or prefix caching; do not reuse this override for long-context serving.
+- MTP5 verifies up to six tokens per request, including the bonus token.
+  The largest target decode graph covers six requests, or 36 tokens.
+
+For performance comparisons, keep the request set, routing, cache capacity,
+communication buffer, and graph sizes fixed. Warm up both communication paths,
+then measure complete 320-request runs without profiling. Collect CPU/NPU traces
+in separate runs, and check TTFT, TPOT, tail latency, and preemptions alongside
+throughput. A CPU wait that overlaps queued NPU work is not entirely device idle
+time.
+
 ## 6 Functional Verification
 
 Once your server is started, you can query the model with input prompts:
