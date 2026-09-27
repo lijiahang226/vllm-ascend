@@ -445,6 +445,33 @@ Recheck capacity and preemptions for the intended context length and concurrency
 before enabling this option. The short-context block override above should not
 be reused for long-context serving.
 
+### 5.5 Experimental compact attention cache
+
+`glm5_next_compact_attention_cache` reduces the physical MLA, indexer, and tail
+storage while keeping the contiguous recurrent-state pool. The worker translates
+scheduler block IDs on the CPU before building the device block tables. Cache
+addresses stay fixed for graph replay, and no device-to-host synchronization is
+added by the mapping. Enable both options together:
+
+```shell
+--additional-config '{"enable_prefill_mc2":true,"glm5_next_contiguous_state_cache":true,"glm5_next_compact_attention_cache":true}'
+```
+
+This experimental option is disabled by default. It requires MRV1, TP1/PP1/CP1,
+`mamba_cache_mode=none`, and ordinary requests without prefix caching, KV transfer,
+KVPP, or sparse KV offload. Resumable input-streaming sessions are outside its
+supported scope: waiting continuations can retain cache beyond the resident
+request bound used by the physical allocator. An exhausted pool or a cache-block
+copy request fails explicitly instead of reusing live storage.
+
+With 160 global blocks, maximum model length 5120, and six sequences per rank,
+the physical plan uses 13 attention/tail rows and 160 recurrent-state rows:
+approximately 8.95 GiB per rank, versus 17.43 GiB with contiguous states alone.
+Tail rows used by dummy execution are reserved separately from live requests.
+The scheduler's automatic memory planner still uses the conservative uncompressed
+allocation budget; this prototype does not use the freed memory to admit more
+requests. Recheck physical capacity for other lengths and concurrency settings.
+
 ## 6 Functional Verification
 
 Once your server is started, you can query the model with input prompts:

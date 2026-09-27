@@ -2,12 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU tests for GLM-Next model-runner pooled cache views."""
 
+from dataclasses import replace
 from itertools import permutations
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
+from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import (
     register_all_kvcache_specs,
 )
@@ -23,6 +26,7 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_groups,
     get_glm5_next_pool_bytes_per_block,
 )
+from vllm_ascend.models.glm5next.compact_cache import Glm5NextCompactCache
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -389,6 +393,129 @@ def test_contiguous_state_only_pipeline_stage_keeps_shared_slot_budget(monkeypat
         first[0].fill_(3)
         second[1].fill_(5)
         torch.testing.assert_close(first[0], torch.full_like(first[0], 3))
+
+
+def _make_compact_cache(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    register_all_kvcache_specs(None)
+    config = _make_config()
+    config.model_config.max_model_len = 8
+    config.max_in_flight_tokens = 1
+    config.scheduler_config.max_num_seqs = 2
+    config.parallel_config.tensor_parallel_size = config.parallel_config.pipeline_parallel_size = 1
+    config.additional_config = {
+        "glm5_next_contiguous_state_cache": True,
+        "glm5_next_compact_attention_cache": True,
+    }
+    groups = get_glm5_next_kv_cache_groups(config, _make_specs())
+    plan = get_glm5_next_kv_cache_config(config, groups, 32 * get_glm5_next_pool_bytes_per_block(groups))
+    runner = _make_runner(config)
+    compact = Glm5NextCompactCache.create(config, plan)
+    runner._glm5_next_compact_cache = compact
+    raw = runner._allocate_kv_cache_tensors(plan)
+    views = runner._reshape_kv_cache_tensors(plan, raw)
+    compact.bind_views(views)
+    return compact, plan, raw, views
+
+
+def _new_compact_request(req_id, blocks):
+    return NewRequestData(
+        req_id=req_id,
+        prompt_token_ids=[1],
+        mm_features=[],
+        sampling_params=None,
+        pooling_params=None,
+        block_ids=blocks,
+        num_computed_tokens=0,
+        lora_request=None,
+    )
+
+
+def test_compact_cache_preserves_unscheduled_requests_and_clears_logical_views(monkeypatch):
+    compact, plan, raw, views = _make_compact_cache(monkeypatch)
+    assert plan.num_blocks == 32 and compact.capacity == 5
+    assert views[MAIN][0].shape[0] == views[STATE][0].shape[0] == 5
+    assert views[MAMBA][0].shape[0] == 32
+    assert raw[INDEXER] is raw[STATE]
+    for entries in views.values():
+        for tensor in entries:
+            tensor.fill_(9)
+    output = SchedulerOutput.make_empty()
+    original = ([31, 30], [29], [28])
+    output.scheduled_new_reqs = [_new_compact_request("a", original)]
+    output.new_block_ids_to_zero = [31, 30, 29, 28]
+    translated = compact.translate(output)
+    assert translated.scheduled_new_reqs[0].block_ids == ([1, 2], [3], [28])
+    assert output.new_block_ids_to_zero == [31, 30, 29, 28]
+    assert translated.new_block_ids_to_zero == []
+    assert torch.count_nonzero(views[MAIN][0][1:3]) == 0
+    assert torch.count_nonzero(views[INDEXER][0][1:3]) == 0
+    assert torch.count_nonzero(views[STATE][0][3]) == 0
+    assert torch.all(views[STATE][0][4] == 9)
+    assert torch.all(views[MAMBA][0] == 9)
+    translated.scheduled_new_reqs[0].block_ids[2].append(27)
+    assert original[2] == [28]
+
+    # Removing A from the current batch does not retire its live mapping.
+    compact.translate(SchedulerOutput.make_empty())
+    views[STATE][0][3].fill_(7)
+    views[STATE][0][1:3].zero_()  # Existing dummy path uses reserved rows.
+    assert torch.all(views[STATE][0][3] == 7)
+    # A streaming continuation resends the existing block list. Reuse it
+    # without clearing the request's accumulated KV or tail state.
+    output = SchedulerOutput.make_empty()
+    output.scheduled_new_reqs = [_new_compact_request("a", ([31, 30], [29], [28]))]
+    assert compact.translate(output).scheduled_new_reqs[0].block_ids == ([1, 2], [3], [28])
+    assert torch.all(views[STATE][0][3] == 7)
+    output = SchedulerOutput.make_empty()
+    output.scheduled_new_reqs = [_new_compact_request("b", ([26], [25], [24]))]
+    translated = compact.translate(output)
+    assert translated.scheduled_new_reqs[0].block_ids == ([3], [4], [24])
+    assert compact.maps[0].requests["a"] == {31: 1, 30: 2}
+    assert torch.all(views[STATE][0][3] == 7)
+
+
+def test_compact_cache_recycles_only_finished_or_preempted_requests(monkeypatch):
+    compact, _, _, views = _make_compact_cache(monkeypatch)
+    output = SchedulerOutput.make_empty()
+    output.scheduled_new_reqs = [
+        _new_compact_request("a", ([31], [30], [29])),
+        _new_compact_request("b", ([28], [27], [26])),
+    ]
+    compact.translate(output)
+    views[MAIN][0][2].fill_(11)
+    step = SchedulerOutput.make_empty()
+    step.preempted_req_ids = {"a"}
+    compact.translate(step)
+    step = SchedulerOutput.make_empty()
+    step.scheduled_cached_reqs = replace(
+        step.scheduled_cached_reqs,
+        req_ids=["a"],
+        resumed_req_ids={"a"},
+        new_block_ids=[([25], [24], [23])],
+        num_computed_tokens=[0],
+        num_output_tokens=[0],
+    )
+    translated = compact.translate(step)
+    assert translated.scheduled_cached_reqs.new_block_ids == [([1], [3], [23])]
+    assert torch.all(views[MAIN][0][2] == 11)
+    # An abort followed by reuse of the same request ID is a fresh allocation.
+    step = SchedulerOutput.make_empty()
+    step.finished_req_ids = {"a"}
+    step.scheduled_new_reqs = [_new_compact_request("a", ([31], [30], [29]))]
+    assert compact.translate(step).scheduled_new_reqs[0].block_ids == ([1], [3], [29])
+
+
+def test_compact_cache_rejects_unsupported_copies_and_capacity_overflow(monkeypatch):
+    compact, _, _, _ = _make_compact_cache(monkeypatch)
+    output = SchedulerOutput.make_empty()
+    output.kv_cache_block_copies = [KVCacheBlockCopy(1, 2)]
+    with pytest.raises(ValueError, match="block copies"):
+        compact.translate(output)
+    output = SchedulerOutput.make_empty()
+    output.scheduled_new_reqs = [_new_compact_request("a", ([1, 2, 3, 4, 5], [6], [7]))]
+    with pytest.raises(RuntimeError, match="capacity exceeded"):
+        compact.translate(output)
 
 
 def test_padded_page_layout_rejected_without_tail_caches():

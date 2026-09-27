@@ -161,6 +161,7 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
 )
 from vllm_ascend.models.glm5next.cache_config import Glm5NextContiguousStateSpec
 from vllm_ascend.models.glm5next.cache_views import view_glm5_next_cache
+from vllm_ascend.models.glm5next.compact_cache import Glm5NextCompactCache
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
 from vllm_ascend.ops.fused_moe.force_eplb import build_force_eplb_topk
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
@@ -908,6 +909,8 @@ class NPUModelRunner(GPUModelRunner):
         ).unsqueeze(1)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
+        if compact := getattr(self, "_glm5_next_compact_cache", None):
+            scheduler_output = compact.translate(scheduler_output)
         # Temporary rewind guard for KV-load-failure recompute.
         # This can be removed after the upstream fix is merged.
         req_data = scheduler_output.scheduled_cached_reqs
@@ -4603,6 +4606,11 @@ class NPUModelRunner(GPUModelRunner):
         self.may_add_encoder_only_layers_to_kv_cache_config()
         apply_layerwise_kv_cache_plan(kv_cache_config, self.vllm_config)
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
+        self._glm5_next_compact_cache = Glm5NextCompactCache.create(self.vllm_config, kv_cache_config)
+        if self._glm5_next_compact_cache and (
+            self.ascend_config.kvpp_config.size > 1 or self.sparse_kv_offload_enabled
+        ):
+            raise ValueError("Compact GLM-Next attention caches do not support KVPP or sparse KV offload.")
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
         self.initialize_attn_backend(kv_cache_config)
         self.use_hybrid_blocks = len(self.attn_groups) > 1
@@ -4621,6 +4629,8 @@ class NPUModelRunner(GPUModelRunner):
             kv_cache_config,
             kv_cache_allocation_context=kv_cache_allocation_context,
         )
+        if self._glm5_next_compact_cache:
+            self._glm5_next_compact_cache.bind_views(kv_caches)
         if any(is_circular_kv_cache_spec(g.kv_cache_spec) for g in kv_cache_config.kv_cache_groups):
             # Lazy import avoids the model/cache registration cycle.
             from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
@@ -4940,7 +4950,12 @@ class NPUModelRunner(GPUModelRunner):
                 shared_layers = get_kv_cache_tensor_layers(descriptor)
                 if not shared_layers:
                     raise ValueError("GLM-Next KV cache descriptor has no layers.")
-                expected_size = kv_cache_config.num_blocks * descriptor.block_stride
+                compact = getattr(self, "_glm5_next_compact_cache", None)
+                num_blocks = (
+                    compact.layer_capacities.get(shared_layers[0], kv_cache_config.num_blocks)
+                    if compact else kv_cache_config.num_blocks
+                )
+                expected_size = num_blocks * descriptor.block_stride
                 if (
                     descriptor.offset != 0
                     or descriptor.layer_stride != 0
@@ -5336,13 +5351,18 @@ class NPUModelRunner(GPUModelRunner):
                     kv_caches[layer_name] = tuple(views) if is_index else views[0]
                     continue
                 if is_glm5_next:
+                    compact = getattr(self, "_glm5_next_compact_cache", None)
+                    num_blocks = (
+                        compact.layer_capacities.get(layer_name, kv_cache_config.num_blocks)
+                        if compact else kv_cache_config.num_blocks
+                    )
                     views = view_glm5_next_cache(
                         layer_name,
                         current_kv_cache_spec,
                         kv_cache_raw_tensors[layer_name],
                         attn_backend=attn_backend,
                         kernel_block_size=self.kernel_block_sizes[group.kv_cache_group_id][0],
-                        num_blocks=kv_cache_config.num_blocks,
+                        num_blocks=num_blocks,
                         get_kv_cache_dims=self._get_attention_kv_cache_dims,
                     )
                     if views is not None:
