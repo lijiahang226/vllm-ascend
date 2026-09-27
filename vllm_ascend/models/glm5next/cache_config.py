@@ -8,8 +8,9 @@ Physical storage uses standard unpacked KV cache descriptors with two page-size
 classes: main MLA/KDA pages and compressed-indexer/tail pages.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
+from vllm import envs as vllm_envs
 from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.v1.core.kv_cache_utils import (
@@ -26,7 +27,13 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.ascend_config import validate_additional_config_bool
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, get_kv_cache_compression_ratio
+
+
+@dataclass(frozen=True)
+class Glm5NextContiguousStateSpec(MambaSpec):
+    """State-only storage; preserves the upstream Mamba manager and block IDs."""
 
 
 @dataclass(frozen=True)
@@ -41,6 +48,7 @@ class _Glm5NextCacheLayout:
     small_page_size: int
     main_slot_count: int
     small_slot_count: int
+    state_slot_count: int
 
 
 def _is_glm5_next_spec(spec: KVCacheSpec) -> bool:
@@ -266,10 +274,21 @@ def _get_glm5_next_cache_layout(
     if len(main_page_sizes) != 1 or len(small_page_sizes) != 1:
         raise ValueError("GLM-Next cache specs were not aligned to two physical page sizes.")
 
-    main_slot_count = max(
-        (
-            len(mla_names),
-            *(len(group.layer_names) for group in mamba_groups),
+    contiguous_states = any(isinstance(group.kv_cache_spec, Glm5NextContiguousStateSpec) for group in mamba_groups)
+    if contiguous_states and (
+        not all(isinstance(group.kv_cache_spec, Glm5NextContiguousStateSpec) for group in mamba_groups)
+        or len({(group.kv_cache_spec.shapes, group.kv_cache_spec.dtypes) for group in mamba_groups}) != 1
+    ):
+        raise ValueError("Contiguous GLM-Next state groups must use the same component shapes and dtypes.")
+    state_slot_count = max((len(group.layer_names) for group in mamba_groups), default=0) if contiguous_states else 0
+    main_slot_count = (
+        len(mla_names)
+        if contiguous_states
+        else max(
+            (
+                len(mla_names),
+                *(len(group.layer_names) for group in mamba_groups),
+            )
         )
     )
     return _Glm5NextCacheLayout(
@@ -283,6 +302,7 @@ def _get_glm5_next_cache_layout(
         small_page_size=next(iter(small_page_sizes)),
         main_slot_count=main_slot_count,
         small_slot_count=len(indexer_names),
+        state_slot_count=state_slot_count,
     )
 
 
@@ -355,6 +375,26 @@ def get_glm5_next_kv_cache_groups(
     if getattr(scheduler_config, "disable_hybrid_kv_cache_manager", False):
         raise ValueError("GLM-Next's paired MLA/indexer and fixed tail layout requires the hybrid KV cache manager.")
 
+    additional_config = getattr(vllm_config, "additional_config", None) or {}
+    contiguous_states = validate_additional_config_bool(
+        additional_config.get("glm5_next_contiguous_state_cache", False),
+        "additional_config.glm5_next_contiguous_state_cache",
+    )
+    if contiguous_states:
+        if (
+            vllm_envs.VLLM_USE_V2_MODEL_RUNNER
+            or vllm_config.cache_config.mamba_cache_mode != "none"
+            or getattr(vllm_config, "kv_transfer_config", None) is not None
+        ):
+            raise ValueError(
+                "Contiguous GLM-Next state caches require MRV1, mamba_cache_mode=none, and no KV transfer."
+            )
+        kv_cache_spec = {
+            name: Glm5NextContiguousStateSpec(**{field.name: getattr(spec, field.name) for field in fields(MambaSpec)})
+            if isinstance(spec, MambaSpec)
+            else spec
+            for name, spec in kv_cache_spec.items()
+        }
     _align_glm5_next_cache_specs(kv_cache_spec)
     mamba_specs = {name: spec for name, spec in kv_cache_spec.items() if isinstance(spec, MambaSpec)}
     attention_specs = {name: spec for name, spec in kv_cache_spec.items() if not isinstance(spec, MambaSpec)}
@@ -375,7 +415,9 @@ def get_glm5_next_pool_bytes_per_block(groups: list[KVCacheGroupSpec]) -> int:
     layout = _get_glm5_next_cache_layout(groups)
     if layout is None:
         raise ValueError("Expected GLM-Next cache groups.")
-    return layout.main_slot_count * layout.main_page_size + layout.small_slot_count * layout.small_page_size
+    return (
+        layout.main_slot_count + layout.state_slot_count
+    ) * layout.main_page_size + layout.small_slot_count * layout.small_page_size
 
 
 def get_glm5_next_kv_cache_config(
@@ -411,12 +453,24 @@ def get_glm5_next_kv_cache_config(
         if slot < len(layout.mla_names):
             shared_by.append(layout.mla_names[slot])
         for group in layout.mamba_groups:
-            if slot < len(group.layer_names):
+            if not layout.state_slot_count and slot < len(group.layer_names):
                 shared_by.append(group.layer_names[slot])
         tensors.append(
             make_tensor(
                 layout.main_page_size * num_blocks,
                 shared_by,
+                layout.main_page_size,
+            )
+        )
+
+    # State components occupy separate contiguous slabs within these buffers.
+    # Only recurrent groups with identical component geometry may alias them;
+    # overlaying MLA's page-addressed view would overwrite other block IDs.
+    for slot in range(layout.state_slot_count):
+        tensors.append(
+            make_tensor(
+                layout.main_page_size * num_blocks,
+                [group.layer_names[slot] for group in layout.mamba_groups if slot < len(group.layer_names)],
                 layout.main_page_size,
             )
         )

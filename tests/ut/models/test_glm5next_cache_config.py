@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec
 from vllm_ascend.models.glm5next.cache_config import (
+    Glm5NextContiguousStateSpec,
     _get_glm5_next_cache_layout,
     get_glm5_next_kv_cache_config,
     get_glm5_next_kv_cache_groups,
@@ -240,6 +241,48 @@ def test_pipeline_projection_supports_a_mamba_only_worker():
     assert plan.num_blocks == 10
     assert len(plan.kv_cache_tensors) == 1
     assert get_kv_cache_tensor_layers(plan.kv_cache_tensors[0]) == [local_mamba_name]
+
+
+def test_contiguous_states_keep_scheduler_groups_and_account_for_separate_storage(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    config = make_config()
+    original = get_glm5_next_kv_cache_groups(config, make_specs())
+    config.additional_config = {"glm5_next_contiguous_state_cache": True}
+    groups = get_glm5_next_kv_cache_groups(config, make_specs())
+    assert [g.layer_names for g in groups] == [g.layer_names for g in original]
+    assert all(isinstance(g.kv_cache_spec, Glm5NextContiguousStateSpec) for g in groups[2:])
+    layout = _get_glm5_next_cache_layout(groups)
+    assert layout.state_slot_count == 1
+    original_bytes = get_glm5_next_pool_bytes_per_block(original)
+    dense_bytes = get_glm5_next_pool_bytes_per_block(groups)
+    assert dense_bytes == original_bytes + layout.main_page_size
+    plan = get_glm5_next_kv_cache_config(config, groups, 20 * dense_bytes)
+    assert plan.num_blocks == 20
+    assert sum(t.size for t in plan.kv_cache_tensors) == 20 * dense_bytes
+    descriptors = {name: t for t in plan.kv_cache_tensors for name in get_kv_cache_tensor_layers(t)}
+    assert descriptors[groups[0].layer_names[0]] is not descriptors[groups[2].layer_names[0]]
+    assert descriptors[groups[2].layer_names[0]] is descriptors[groups[3].layer_names[0]]
+    assert get_glm5_next_max_memory_usage(config, groups) * original_bytes == (
+        get_glm5_next_max_memory_usage(config, original) * dense_bytes
+    )
+    projected = [KVCacheGroupSpec(g.layer_names if i == 2 else [], g.kv_cache_spec) for i, g in enumerate(groups)]
+    local_plan = get_glm5_next_kv_cache_config(config, projected, 20 * layout.main_page_size)
+    assert local_plan.num_blocks == 20
+    assert len(local_plan.kv_cache_tensors) == 1
+    assert get_kv_cache_tensor_layers(local_plan.kv_cache_tensors[0]) == groups[2].layer_names
+
+
+@pytest.mark.parametrize("unsupported", ["checkpoint", "transfer", "mrv2"])
+def test_contiguous_states_reject_unsupported_storage_consumers(monkeypatch, unsupported):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if unsupported == "mrv2" else "0")
+    config = make_config()
+    config.additional_config = {"glm5_next_contiguous_state_cache": True}
+    if unsupported == "checkpoint":
+        config.cache_config.mamba_cache_mode = "align"
+    if unsupported == "transfer":
+        config.kv_transfer_config = object()
+    with pytest.raises(ValueError, match="require MRV1"):
+        get_glm5_next_kv_cache_groups(config, make_specs())
 
 
 def test_missing_paired_cache_is_rejected():

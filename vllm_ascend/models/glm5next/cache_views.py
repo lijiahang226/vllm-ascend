@@ -3,6 +3,7 @@
 """Pooled-cache physical views for GLM-Next on Model Runner V1."""
 
 from collections.abc import Callable
+from math import prod
 
 import torch
 from vllm.utils.torch_utils import get_dtype_size
@@ -15,6 +16,22 @@ from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
     get_storage_block_size,
 )
+from vllm_ascend.models.glm5next.cache_config import Glm5NextContiguousStateSpec
+
+
+def _view_contiguous_state_cache(
+    spec: Glm5NextContiguousStateSpec, raw_cache: torch.Tensor, num_blocks: int
+) -> list[torch.Tensor]:
+    """Keep state component rows contiguous without per-step packing copies."""
+    if raw_cache.numel() * raw_cache.element_size() != num_blocks * spec.page_size_bytes:
+        raise ValueError("Invalid contiguous GLM-Next state backing size.")
+    states = []
+    offset = 0
+    for shape, dtype in zip(spec.shapes, spec.dtypes):
+        size = num_blocks * prod(shape) * get_dtype_size(dtype)
+        states.append(raw_cache[offset : offset + size].view(dtype).view(num_blocks, *shape))
+        offset += size
+    return states
 
 
 def _row_major_strides(shape: tuple[int, ...]) -> list[int]:
@@ -129,6 +146,10 @@ def view_glm5_next_cache(
     when the spec is not owned by the GLM-Next pooled layout, so the caller
     falls through to its generic reshape paths.
     """
+    if isinstance(kv_cache_spec, Glm5NextContiguousStateSpec):
+        if not isinstance(raw_cache, torch.Tensor):
+            raise ValueError(f"Contiguous state cache for {layer_name} must use one raw tensor.")
+        return _view_contiguous_state_cache(kv_cache_spec, raw_cache, num_blocks)
     if isinstance(kv_cache_spec, AscendIndexerKPoolTailSpec):
         return _view_kpool_tail_cache(layer_name, kv_cache_spec, raw_cache, num_blocks)
     if isinstance(kv_cache_spec, AscendMLAAttentionSpec) and getattr(

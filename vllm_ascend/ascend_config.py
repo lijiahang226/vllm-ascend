@@ -484,6 +484,9 @@ class AscendConfig:
     enable_cpu_binding: bool = True
     multistream_dsv4_dsa_overlap: bool = True
     enable_prefill_mc2: bool = False
+    # GLM-Next MRV1: trade cache capacity for contiguous recurrent-state views.
+    # Disabled by default; supported only without state checkpoints or KV transfer.
+    glm5_next_contiguous_state_cache: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"

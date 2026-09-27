@@ -11,7 +11,7 @@ import torch
 from vllm.v1.core.single_type_kv_cache_manager import (
     register_all_kvcache_specs,
 )
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec
 
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
@@ -327,6 +327,68 @@ def test_padded_page_layout_detected_for_shared_state_pages():
     config, _, plan = _make_plan()
     layer_specs = _make_runner(config)._get_layer_kv_cache_specs(plan)
     assert requires_padded_page_layout(layer_specs.values())
+
+
+def test_contiguous_state_components_do_not_alias_attention_or_other_block_ids(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    config = _make_config()
+    config.additional_config = {"glm5_next_contiguous_state_cache": True}
+    groups = get_glm5_next_kv_cache_groups(config, _make_specs())
+    plan = get_glm5_next_kv_cache_config(config, groups, 4 * get_glm5_next_pool_bytes_per_block(groups))
+    runner = _make_runner(config)
+    raw = runner._allocate_kv_cache_tensors(plan)
+    caches = runner._reshape_kv_cache_tensors(plan, raw)
+    assert raw[MAIN] is not raw[MAMBA]
+    conv, ssm = caches[MAMBA]
+    assert conv.is_contiguous() and ssm.is_contiguous()
+    assert conv.untyped_storage().data_ptr() == ssm.untyped_storage().data_ptr()
+    assert conv.data_ptr() + conv.numel() * conv.element_size() == ssm.data_ptr()
+    conv.fill_(11)
+    ssm.fill_(13)
+    caches[MAIN][0].fill_(7)
+    conv[3].fill_(17)
+    ssm[1].fill_(19)
+    torch.testing.assert_close(conv[:3], torch.full_like(conv[:3], 11))
+    torch.testing.assert_close(ssm[[0, 2, 3]], torch.full_like(ssm[[0, 2, 3]], 13))
+    torch.testing.assert_close(caches[MAIN][0], torch.full_like(caches[MAIN][0], 7))
+    payload = conv.numel() * conv.element_size() + ssm.numel() * ssm.element_size()
+    assert torch.count_nonzero(raw[MAMBA][payload:]) == 0
+
+
+def test_contiguous_state_only_pipeline_stage_keeps_shared_slot_budget(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    config = _make_config()
+    config.additional_config = {"glm5_next_contiguous_state_cache": True}
+    specs = _make_specs()
+    second_state = "model.layers.1.linear_attn"
+    specs[second_state] = specs[MAMBA]
+    specs = {
+        name.replace("layers.1.", "layers.2.") if name != second_state else name: spec for name, spec in specs.items()
+    }
+    groups = get_glm5_next_kv_cache_groups(config, specs)
+    groups = [
+        KVCacheGroupSpec(g.layer_names if isinstance(g.kv_cache_spec, MambaSpec) else [], g.kv_cache_spec)
+        for g in groups
+    ]
+    plan = get_glm5_next_kv_cache_config(config, groups, 4 * get_glm5_next_pool_bytes_per_block(groups))
+    runner = _make_runner(config)
+    runner.kernel_block_sizes = [[0] for _ in groups]
+    runner._kv_cache_spec_attn_group_iterator = lambda: iter(
+        [
+            SimpleNamespace(backend=None, kv_cache_spec=g.kv_cache_spec, layer_names=g.layer_names, kv_cache_group_id=i)
+            for i, g in enumerate(groups)
+            if g.layer_names
+        ]
+    )
+    raw = runner._allocate_kv_cache_tensors(plan)
+    assert raw[MAMBA] is raw[second_state]
+    assert raw[MAMBA].numel() == sum(t.size for t in plan.kv_cache_tensors)
+    caches = runner._reshape_kv_cache_tensors(plan, raw)
+    for first, second in zip(caches[MAMBA], caches[second_state]):
+        assert first.is_contiguous() and second.is_contiguous()
+        first[0].fill_(3)
+        second[1].fill_(5)
+        torch.testing.assert_close(first[0], torch.full_like(first[0], 3))
 
 
 def test_padded_page_layout_rejected_without_tail_caches():

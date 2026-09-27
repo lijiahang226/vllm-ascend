@@ -414,6 +414,37 @@ in separate runs, and check TTFT, TPOT, tail latency, and preemptions alongside
 throughput. A CPU wait that overlaps queued NPU work is not entirely device idle
 time.
 
+### 5.4 Optional contiguous recurrent-state cache
+
+On Model Runner V1, `glm5_next_contiguous_state_cache` stores the KDA state
+components in contiguous buffers. This lets the existing state gather/scatter
+operations access the selected rows without materializing the entire strided
+state pool. The option changes the cache layout; it does not replace operators
+or modify the scheduler's block IDs.
+
+The option is disabled by default. To combine it with the prefill MC2
+configuration above, use:
+
+```shell
+--additional-config '{"enable_prefill_mc2":true,"glm5_next_contiguous_state_cache":true}'
+```
+
+This layout requires Model Runner V1, `mamba_cache_mode=none`, and no KV transfer
+connector. It separates the recurrent-state storage from the main MLA pool, so
+it consumes more memory at the same block count. For the configuration in
+Section 5.3, 160 blocks require approximately 17.43 GiB of cache per rank instead
+of 9.23 GiB. These figures describe cache allocation, not total device memory.
+Automatic block sizing accounts for the extra storage and allocates fewer
+blocks within the same memory budget.
+
+The measured 160-block workload reached 65024 MB of device HBM usage on a
+65536 MB device, leaving little headroom. Reserve additional runtime headroom
+when selecting a block-count override for deployment.
+
+Recheck capacity and preemptions for the intended context length and concurrency
+before enabling this option. The short-context block override above should not
+be reused for long-context serving.
+
 ## 6 Functional Verification
 
 Once your server is started, you can query the model with input prompts:

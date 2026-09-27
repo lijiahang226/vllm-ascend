@@ -159,6 +159,7 @@ from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.models.deepseek_v41.cache_config import (
     is_deepseek_v41_cache,
 )
+from vllm_ascend.models.glm5next.cache_config import Glm5NextContiguousStateSpec
 from vllm_ascend.models.glm5next.cache_views import view_glm5_next_cache
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
 from vllm_ascend.ops.fused_moe.force_eplb import build_force_eplb_topk
@@ -4932,7 +4933,9 @@ class NPUModelRunner(GPUModelRunner):
         # the compressed indexer and its state cache). This differs from the
         # generic main layout, which treats descriptor layers as independent
         # regions within one common backing.
-        if uses_padded_page_layout:
+        if uses_padded_page_layout or any(
+            isinstance(spec, Glm5NextContiguousStateSpec) for spec in layer_kv_cache_spec.values()
+        ):
             for descriptor in kv_cache_config.kv_cache_tensors:
                 shared_layers = get_kv_cache_tensor_layers(descriptor)
                 if not shared_layers:
@@ -5281,7 +5284,10 @@ class NPUModelRunner(GPUModelRunner):
                 for descriptor in kv_cache_config.kv_cache_tensors
                 for name in descriptor.layers
             }
-        is_glm5_next = any(is_glm5_next_cache_spec(spec) for spec in layer_kv_cache_spec.values())
+        is_glm5_next = any(
+            is_glm5_next_cache_spec(spec) or isinstance(spec, Glm5NextContiguousStateSpec)
+            for spec in layer_kv_cache_spec.values()
+        )
 
         for group in self._kv_cache_spec_attn_group_iterator():
             attn_backend = group.backend
