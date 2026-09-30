@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Pooled-cache physical views for GLM-Next on Model Runner V1."""
+"""Pooled-cache physical views for GLM-Next."""
 
 from collections.abc import Callable
 
@@ -24,10 +24,10 @@ def _row_major_strides(shape: tuple[int, ...]) -> list[int]:
     return strides
 
 
-def _view_kpool_tail_cache(
+def view_kpool_tail_cache(
     layer_name: str,
     kv_cache_spec: AscendIndexerKPoolTailSpec,
-    raw_cache: torch.Tensor,
+    raw_cache: torch.Tensor | tuple[torch.Tensor, ...],
     num_blocks: int,
 ) -> list[torch.Tensor]:
     if not isinstance(raw_cache, torch.Tensor):
@@ -44,8 +44,8 @@ def _view_kpool_tail_cache(
     return [
         torch.as_strided(
             typed_slot,
-            size=(num_blocks, 2, kv_cache_spec.block_size, kv_cache_spec.head_size),
-            stride=(page_el, kv_cache_spec.block_size * kv_cache_spec.head_size, kv_cache_spec.head_size, 1),
+            size=(num_blocks, kv_cache_spec.block_size, 2 * kv_cache_spec.head_size),
+            stride=(page_el, 2 * kv_cache_spec.head_size, 1),
         )
     ]
 
@@ -129,7 +129,7 @@ def view_glm5_next_cache(
     falls through to its generic reshape paths.
     """
     if isinstance(kv_cache_spec, AscendIndexerKPoolTailSpec):
-        return _view_kpool_tail_cache(layer_name, kv_cache_spec, raw_cache, num_blocks)
+        return view_kpool_tail_cache(layer_name, kv_cache_spec, raw_cache, num_blocks)
     if isinstance(kv_cache_spec, AscendMLAAttentionSpec) and getattr(
         kv_cache_spec, "indexes_kv_by_block_stride", False
     ):

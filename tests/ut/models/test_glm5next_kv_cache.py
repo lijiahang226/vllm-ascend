@@ -358,7 +358,7 @@ def test_indexer_metadata_request_buffers_cover_graph_token_padding():
     metadata = builder.build_for_drafting(common, draft_index=1)
 
     assert metadata.seq_lens.tolist() == [1, 2, 0, 0]
-    assert metadata.cum_query_lens.tolist() == [1, 2, 3, 4]
+    assert metadata.cum_query_lens.tolist() == [1, 2, 2, 2]
     assert metadata.raw_seq_lens.tolist() == [17, 33, 0, 0]
 
 
@@ -404,6 +404,10 @@ def test_indexer_metadata_buffers_are_stable_per_draft_step():
         first.cum_query_lens.data_ptr(),
         first.raw_seq_lens.data_ptr(),
         first.positions.data_ptr(),
+        first.query_start_loc.data_ptr(),
+        first.start_pos.data_ptr(),
+        first.pool_tail.data_ptr(),
+        first.pooled_key_indices.data_ptr(),
     )
     captured = builder.build_for_graph_capture(common, attn_state=object())
     drafted = builder.build_for_drafting(
@@ -423,6 +427,10 @@ def test_indexer_metadata_buffers_are_stable_per_draft_step():
         refreshed.cum_query_lens.data_ptr(),
         refreshed.raw_seq_lens.data_ptr(),
         refreshed.positions.data_ptr(),
+        refreshed.query_start_loc.data_ptr(),
+        refreshed.start_pos.data_ptr(),
+        refreshed.pool_tail.data_ptr(),
+        refreshed.pooled_key_indices.data_ptr(),
     )
     assert refreshed_ptrs == first_ptrs
     assert refreshed.positions.tolist() == [32, 33]
@@ -437,5 +445,9 @@ def test_indexer_metadata_buffers_are_stable_per_draft_step():
         second.cum_query_lens.data_ptr(),
         second.raw_seq_lens.data_ptr(),
         second.positions.data_ptr(),
+        second.query_start_loc.data_ptr(),
+        second.start_pos.data_ptr(),
+        second.pool_tail.data_ptr(),
+        second.pooled_key_indices.data_ptr(),
     )
     assert all(left != right for left, right in zip(first_ptrs, second_ptrs))
