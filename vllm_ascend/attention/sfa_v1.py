@@ -1558,6 +1558,32 @@ class AscendSFAImpl(MLAAttentionImpl):
             topk_indices_to_cache = topk_indices_to_cache.squeeze(1)
         topk_indices_buffer.copy_(topk_indices_to_cache)
 
+    @staticmethod
+    def _refresh_mtp_topk_indices(topk_indices: torch.Tensor, attn_metadata: M) -> None:
+        """Extend an incomplete cached selection for single-query MTP steps."""
+        local_start = 0
+        context = getattr(attn_metadata, "dsa_cp_context", None)
+        if context is not None:
+            local_start = context.local_start
+        num_tokens = topk_indices.shape[0]
+        # Steps after compaction have one query per request. seq_lens is the
+        # per-step device buffer updated before graph replay; positions may
+        # instead refer to a graph-capture-time snapshot.
+        seq_lens = attn_metadata.seq_lens[local_start : local_start + num_tokens]
+        if seq_lens.numel() < num_tokens:
+            seq_lens = torch.nn.functional.pad(seq_lens, (0, num_tokens - seq_lens.numel()))
+        columns = torch.arange(topk_indices.shape[-1], device=topk_indices.device, dtype=topk_indices.dtype)
+        dense_indices = torch.where(columns[None, None, :] < seq_lens[:, None, None], columns[None, None, :], -1)
+        # Step 0 may have fewer than top-k visible keys. Reusing its -1 padding
+        # after seq_lens advances makes SFA read an invalid index. Such rows
+        # selected every historical key, so extend them without rescoring.
+        # Preserve ranked selections for long requests once the cached row
+        # has reached top-k. Short/clamped requests must cover only live keys.
+        needs_dense = (topk_indices[..., -1:] < 0) | (seq_lens[:, None, None] <= topk_indices.shape[-1])
+        refreshed = torch.where(needs_dense, dense_indices, topk_indices)
+        live = seq_lens > 0
+        topk_indices.copy_(torch.where(live[:, None, None], refreshed, -1))
+
     def _execute_sparse_flash_attention_process(
         self,
         ql_nope,
@@ -1980,6 +2006,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             topk_indices = self._get_indexcache_topk_indices(parallel_context.topk_num_tokens)
         else:
             raise RuntimeError(f"skip_topk is False but indexer is None. layer_name={self.layer_name}.")
+
+        if self.skip_topk and self._is_mtp_layer and self.qk_rope_head_dim > 0:
+            self._refresh_mtp_topk_indices(topk_indices, attn_metadata)
 
         # Notify for every layer that wrote the cache, not just indexer layers:
         # by this point all of the layer's KV (main + indexer) has been
