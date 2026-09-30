@@ -12,6 +12,7 @@ from torch import nn
 import vllm_ascend.attention.indexer_kpool as backend_module
 from vllm_ascend.attention.indexer_kpool import (
     AscendIndexerKPoolMetadata,
+    AscendIndexerKPoolQueryMetadata,
     AscendIndexerKPoolTailMetadata,
     Glm5NextKPoolIndexerBackend,
 )
@@ -207,12 +208,14 @@ class _RecordingKPool(nn.Module):
         self.args = args
         self.kwargs = kwargs
         if kwargs["compute_topk"]:
-            return torch.zeros(args[0].shape[0], 1, 5, dtype=torch.int32)
+            return torch.zeros(args[1].shape[0], 1, 5, dtype=torch.int32)
         return None
 
 
+@pytest.mark.parametrize("dsa_cp", [False, True])
 def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     monkeypatch,
+    dsa_cp,
 ) -> None:
     backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(backend)
@@ -257,6 +260,13 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     metadata.seq_lens = torch.tensor([0, 0], dtype=torch.int32)
     metadata.positions = torch.tensor([0, 0])
     metadata.slot_mapping = torch.tensor([-1, -1])
+    if dsa_cp:
+        metadata.query_metadata = AscendIndexerKPoolQueryMetadata(
+            positions=metadata.positions, cum_query_lens=metadata.cum_query_lens, num_actual_tokens=2
+        )
+        metadata.positions = torch.zeros(4, dtype=torch.int64)
+        group = SimpleNamespace(all_gather=lambda x, dim: torch.cat((x, x)))
+        monkeypatch.setattr(backend_module, "get_tp_group", lambda: group)
 
     result = backend.forward(
         hidden,
@@ -276,10 +286,48 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
         backend.k_norm.bias,
         backend.k_norm.eps,
     )
-    torch.testing.assert_close(backend.indexer_op.args[0], expected_k)
+    torch.testing.assert_close(
+        backend.indexer_op.args[0], torch.cat((expected_k, expected_k)) if dsa_cp else expected_k
+    )
     assert backend.indexer_op.args[0].dtype == torch.float32
     expected_weights = torch.nn.functional.linear(hidden, backend.wk_weights_proj.weight[2:]) * (0.5 * 2**-0.5)
     torch.testing.assert_close(backend.indexer_op.args[2], expected_weights)
     assert backend.indexer_op.args[7] is tail_metadata
     assert backend.indexer_op.kwargs is not None
     assert backend.indexer_op.kwargs["compute_topk"] is True
+    assert backend.indexer_op.kwargs["query_metadata"] is metadata.query_metadata
+
+
+def test_dsacp_kpool_compresses_global_tokens_and_selects_local_queries(monkeypatch):
+    metadata = _indexer_metadata()
+    local_positions = metadata.positions[4:]
+    query_metadata = AscendIndexerKPoolQueryMetadata(
+        positions=local_positions, cum_query_lens=torch.tensor([0, 4], dtype=torch.int32), num_actual_tokens=3
+    )
+    compress = MagicMock()
+    select = MagicMock(return_value=torch.full((4, 1, 7), -1, dtype=torch.int32))
+    monkeypatch.setattr(kpool_module, "glm5_next_kpool_tail_compress_and_write_cache_triton", compress)
+    monkeypatch.setattr(kpool_module, "glm5_next_lightning_indexer_triton", select)
+    result = SparseAttnIndexerKpool(4, 2)(
+        torch.zeros(8, 2),
+        torch.zeros(4, 1, 2, dtype=torch.bfloat16),
+        torch.ones(4, 1, dtype=torch.bfloat16),
+        metadata.positions,
+        torch.zeros(2, 2, 1, 2, dtype=torch.bfloat16),
+        torch.zeros(2, 2, 4, 2),
+        metadata,
+        _tail_metadata(),
+        gate_score=torch.zeros(8, 2),
+        compress_ape=torch.zeros(4, 2),
+        index_kpool=4,
+        max_pool_seq_len=1,
+        compute_topk=True,
+        query_metadata=query_metadata,
+    )
+    assert compress.call_args.args[2].shape[0] == 8
+    assert compress.call_args.args[6] is metadata.cum_query_lens
+    assert select.call_args.args[3] is query_metadata.cum_query_lens
+    assert select.call_args.args[6] is local_positions
+    assert result.shape[0] == 4
+    assert torch.all(result[3] == -1)
+    torch.testing.assert_close(result[:3, 0, 0], torch.tensor([0, 0, 0], dtype=torch.int32))
