@@ -390,6 +390,9 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
             actual_seq_lengths_key = self.dsa_cp_actual_seq_lengths_key
 
         num_segs = cum_query_lens.shape[0]
+        shared_seq_lens = getattr(common_attn_metadata, "mtp_shared_seq_lens", None)
+        if shared_seq_lens is not None and not self.nope:
+            seq_lens = shared_seq_lens[:num_segs]
         local_query_lens, local_key_lens = get_cp_local_query_key_lens(
             common_attn_metadata.query_start_loc,
             cum_query_lens,

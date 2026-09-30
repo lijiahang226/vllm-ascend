@@ -287,6 +287,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             torch.zeros(metadata_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
             for _ in range(self.num_speculative_tokens)
         ]
+        self.mtp_shared_seq_lens = (
+            torch.zeros_like(self.seq_lens_group[0]) if self._share_mtp_indices and self.dcp_size == 1 else None
+        )
         self.query_start_loc_group = [
             torch.zeros(metadata_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
             for _ in range(self.num_speculative_tokens)
@@ -706,6 +709,26 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     def _build_multi_group_graph_capture_metadata(self, common_attn_metadata, draft_index):
         return None
 
+    def _prepare_mtp_shared_seq_lens(self, common_attn_metadata):
+        shared_seq_lens = getattr(self, "mtp_shared_seq_lens", None)
+        if shared_seq_lens is not None:
+            # Snapshot after rejection correction: the compacted index row
+            # belongs to the selected query, not the end of the first pass.
+            num_reqs = common_attn_metadata.seq_lens.shape[0]
+            shared_seq_lens[:num_reqs].copy_(common_attn_metadata.seq_lens)
+            shared_seq_lens[num_reqs:].zero_()
+
+    def _set_mtp_shared_seq_lens(self, common_attn_metadata, draft_index):
+        # DCP remaps selections to rank-local KV coordinates and can introduce
+        # interior -1 gaps; freezing a global boundary cannot remove those.
+        common_attn_metadata.mtp_shared_seq_lens = None
+        shared_seq_lens = getattr(self, "mtp_shared_seq_lens", None)
+        if shared_seq_lens is not None and draft_index > 0:
+            # Only attention reuses this graph-stable boundary; positions,
+            # slot mappings and true lengths continue to advance.
+            num_reqs = common_attn_metadata.seq_lens.shape[0]
+            common_attn_metadata.mtp_shared_seq_lens = shared_seq_lens[:num_reqs]
+
     def _common_attn_metadata_for_draft_group(
         self,
         common_attn_metadata,
@@ -849,6 +872,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     common_attn_metadata.context_parallel_metadata = dcp_manager.long_seq_metadata
 
                 assert len(self.draft_attn_groups) > 0
+                self._prepare_mtp_shared_seq_lens(common_attn_metadata)
                 # update the tensor's address for each step.
                 for draft_index in range(self.num_speculative_tokens):
                     common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
@@ -867,6 +891,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     self.seq_lens_group[draft_index][:num_reqs].copy_(common_attn_metadata.seq_lens)
                     self.seq_lens_group[draft_index][num_reqs:].fill_(0)
                     common_attn_metadata.seq_lens = self.seq_lens_group[draft_index][:num_reqs]
+                    self._set_mtp_shared_seq_lens(common_attn_metadata, draft_index)
                     self.query_start_loc_group[draft_index][: num_reqs + 1].copy_(common_attn_metadata.query_start_loc)
                     self.query_start_loc_group[draft_index][num_reqs + 1 :].fill_(0)
                     common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_index][: num_reqs + 1]
@@ -1178,6 +1203,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.seq_lens_group[0][:num_reqs_padded].copy_(common_attn_metadata.seq_lens)
         self.seq_lens_group[0][num_reqs_padded:].fill_(0)
         common_attn_metadata.seq_lens = self.seq_lens_group[0][:num_reqs_padded]
+        self._set_mtp_shared_seq_lens(common_attn_metadata, draft_index=0)
 
         self.query_start_loc_group[0][: num_reqs_padded + 1].copy_(common_attn_metadata.query_start_loc)
         self.query_start_loc_group[0][num_reqs_padded + 1 :].fill_(0)
@@ -1202,6 +1228,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             next_step_seq_lens.copy_(common_attn_metadata.seq_lens)
             next_step_seq_lens[:batch_size].sub_(num_rejected_tokens_gpu[:batch_size])
             common_attn_metadata.seq_lens = next_step_seq_lens
+
+        self._prepare_mtp_shared_seq_lens(common_attn_metadata)
 
         if self.uses_mrope:
             used_update_positions = self.mrope_positions[:, token_indices_to_sample]
@@ -2108,6 +2136,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.seq_lens_group[draft_index][: common_attn_metadata.seq_lens.shape[0]].copy_(common_attn_metadata.seq_lens)
         self.seq_lens_group[draft_index][common_attn_metadata.seq_lens.shape[0] :].fill_(0)
         common_attn_metadata.seq_lens = self.seq_lens_group[draft_index][: common_attn_metadata.seq_lens.shape[0]]
+        self._set_mtp_shared_seq_lens(common_attn_metadata, draft_index)
 
         self.query_start_loc_group[draft_index][: common_attn_metadata.query_start_loc.shape[0]].copy_(
             common_attn_metadata.query_start_loc

@@ -1187,7 +1187,6 @@ class TestAscendSFAImpl(TestBase):
             cos=None,
             sin=None,
             slot_mapping=torch.arange(2),
-            seq_lens=torch.tensor([1, 2], dtype=torch.int32),
             num_input_tokens=2,
             num_decode_tokens=2,
             attn_state=AscendAttentionState.DecodeOnly,
@@ -1246,7 +1245,7 @@ class TestAscendSFAImpl(TestBase):
                     "cache", (hidden, hidden, hidden, hidden)
                 )
                 self.impl._sfa_preprocess_mlapo = self.impl._sfa_preprocess_prolog_v3
-                self.impl._get_indexcache_topk_indices = lambda _: torch.zeros(2, 1, 1, dtype=torch.int32)
+                self.impl._get_indexcache_topk_indices = lambda _: torch.zeros(2, 1, dtype=torch.int64)
                 self.impl._execute_sparse_flash_attention_process = lambda *_args: torch.ones(2, 4)
                 self.impl._v_up_proj = lambda x: x
                 self.impl._finalize_o_proj = lambda x, output, _: output.copy_(x)

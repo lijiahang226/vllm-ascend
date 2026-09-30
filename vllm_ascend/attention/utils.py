@@ -242,6 +242,10 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # E.g., 1 for normal decoding, >1 for speculative decoding.
     decode_token_per_req: int = 1
 
+    # Step-0 KV visibility for subsequent single-query MTP index reuse.
+    # Real seq_lens and cache writes continue to advance independently.
+    mtp_shared_seq_lens: torch.Tensor | None = None
+
     # Actual query sequence lengths for each token in the batch (CPU list).
     # E.g., [1, 1, 1, 128] for 3 decode tokens and 1 prefill with 128 tokens.
     actual_seq_lengths_q: list[int] = field(default_factory=list)
@@ -302,6 +306,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             num_actual_tokens=num_actual_tokens,
             max_query_len=self.max_query_len,
             decode_token_per_req=self.decode_token_per_req,
+            mtp_shared_seq_lens=_slice_reqs(self.mtp_shared_seq_lens),
             # NOTE: keep all tokens for block_table_tensor and slot_mapping otherwise
             # there will be error about shape mismatch during reshape and cache.
             # This is really strange since vLLM slices them as well
