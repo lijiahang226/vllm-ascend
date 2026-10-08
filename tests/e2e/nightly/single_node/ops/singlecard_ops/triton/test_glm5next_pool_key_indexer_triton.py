@@ -14,18 +14,20 @@ POOL_SIZE = 4
 INDEX_TOPK = 2048
 CACHE_BLOCK_SIZE = 16
 OUTPUT_WIDTH = INDEX_TOPK + POOL_SIZE - 1
+SHARED_CACHE_BLOCK_SIZE = 32
 
 
 def _assert_selection(result, query, cache, weights, ends, pool_lens, table, positions, pack_tail=False):
     """CPU reference: score each query head before applying the head weights."""
     result, query, cache, weights = (x.cpu() for x in (result, query, cache, weights))
+    cache_block_size = cache.shape[1]
     start = 0
     for req, end in enumerate(ends.tolist()):
         for row in range(start, end):
             pos = int(positions[row])
             count = min((pos + 1) // POOL_SIZE, int(pool_lens[req]))
             ids = torch.arange(count)
-            keys = cache[table[req, ids // CACHE_BLOCK_SIZE].long(), ids % CACHE_BLOCK_SIZE, 0].float()
+            keys = cache[table[req, ids // cache_block_size].long(), ids % cache_block_size, 0].float()
             per_head_scores = query[row].float() @ keys.T
             scores = (per_head_scores * weights[row].float()[:, None]).sum(0)
             selected = torch.topk(scores, min(INDEX_TOPK // POOL_SIZE, count)).indices
@@ -61,15 +63,16 @@ def test_pool_selection_real_shape_paging_and_causal_tail(max_pool_seq_len, use_
     ends = torch.tensor([6] if shared_query else [3, 5, 8], dtype=torch.int32)
     num_tokens = 8 if shared_query else 10
     num_requests = ends.numel()
-    pages = (max_pool_seq_len + CACHE_BLOCK_SIZE - 1) // CACHE_BLOCK_SIZE
+    cache_block_size = SHARED_CACHE_BLOCK_SIZE if shared_query else CACHE_BLOCK_SIZE
+    pages = (max_pool_seq_len + cache_block_size - 1) // cache_block_size
     num_blocks = max(1, num_requests * pages)
     table = (
         torch.randperm(num_blocks, generator=generator)[: num_requests * pages]
         .reshape(num_requests, pages)
         .to(torch.int32)
     )
-    backing = torch.randn(num_blocks, CACHE_BLOCK_SIZE + 2, 1, HEAD_DIM, generator=generator).bfloat16()
-    cache = backing.npu()[:, :CACHE_BLOCK_SIZE]
+    backing = torch.randn(num_blocks, cache_block_size + 2, 1, HEAD_DIM, generator=generator).bfloat16()
+    cache = backing.npu()[:, :cache_block_size]
     query = torch.randn(num_tokens, NUM_HEADS, HEAD_DIM, generator=generator).bfloat16().npu()
     weights = torch.randn(num_tokens, NUM_HEADS, generator=generator).bfloat16().npu()
     pool_lens = torch.tensor(
@@ -123,7 +126,7 @@ def test_pool_selection_real_shape_paging_and_causal_tail(max_pool_seq_len, use_
             assert result.data_ptr() == output_buffer.data_ptr()
             assert (output_buffer[:, OUTPUT_WIDTH:] == -1).all()
             assert (backing_output[1::2] == 77).all()
-        torch.testing.assert_close(cache.cpu(), backing[:, :CACHE_BLOCK_SIZE], rtol=0, atol=0)
+        torch.testing.assert_close(cache.cpu(), backing[:, :cache_block_size], rtol=0, atol=0)
 
 
 def test_empty_query():
