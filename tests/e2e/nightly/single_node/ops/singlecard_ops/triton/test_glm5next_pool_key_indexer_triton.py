@@ -55,31 +55,44 @@ def _assert_selection(result, query, cache, weights, ends, pool_lens, table, pos
 @torch.inference_mode()
 def test_pool_selection_real_shape_paging_and_causal_tail(max_pool_seq_len, use_graph, monkeypatch):
     generator = torch.Generator().manual_seed(19)
-    # Three requests exercise non-power-of-two bucketization. Two extra rows
-    # model graph padding, which the fused expansion clears.
-    ends = torch.tensor([3, 5, 8], dtype=torch.int32)
-    num_tokens = 10
+    # Keep multi-request bucketization coverage, and use the longest existing
+    # case for six queries sharing one request plus two graph-padding rows.
+    shared_query = max_pool_seq_len == 2050
+    ends = torch.tensor([6] if shared_query else [3, 5, 8], dtype=torch.int32)
+    num_tokens = 8 if shared_query else 10
+    num_requests = ends.numel()
     pages = (max_pool_seq_len + CACHE_BLOCK_SIZE - 1) // CACHE_BLOCK_SIZE
-    num_blocks = max(1, 3 * pages)
-    table = torch.randperm(num_blocks, generator=generator)[: 3 * pages].reshape(3, pages).to(torch.int32)
+    num_blocks = max(1, num_requests * pages)
+    table = (
+        torch.randperm(num_blocks, generator=generator)[: num_requests * pages]
+        .reshape(num_requests, pages)
+        .to(torch.int32)
+    )
     backing = torch.randn(num_blocks, CACHE_BLOCK_SIZE + 2, 1, HEAD_DIM, generator=generator).bfloat16()
     cache = backing.npu()[:, :CACHE_BLOCK_SIZE]
     query = torch.randn(num_tokens, NUM_HEADS, HEAD_DIM, generator=generator).bfloat16().npu()
     weights = torch.randn(num_tokens, NUM_HEADS, generator=generator).bfloat16().npu()
-    pool_lens = torch.tensor([0, min(4, max_pool_seq_len), max_pool_seq_len], dtype=torch.int32)
+    pool_lens = torch.tensor(
+        [max_pool_seq_len] if shared_query else [0, min(4, max_pool_seq_len), max_pool_seq_len], dtype=torch.int32
+    )
     last_pos = max(2, max_pool_seq_len * POOL_SIZE + 2)
-    positions = torch.tensor([0, 1, 2, 1, 2, last_pos - 2, last_pos - 1, last_pos, 0, 0])
-    device_lens, device_positions = pool_lens.npu(), positions.npu()
-    args = (query, cache, weights, ends.npu(), device_lens, table.npu(), device_positions)
+    positions = torch.tensor(
+        [0, last_pos - 1, 7, last_pos - 2, 15, last_pos, 0, 0]
+        if shared_query
+        else [0, 1, 2, 1, 2, last_pos - 2, last_pos - 1, last_pos, 0, 0]
+    )
+    device_ends, device_lens, device_positions = ends.npu(), pool_lens.npu(), positions.npu()
+    args = (query, cache, weights, device_ends, device_lens, table.npu(), device_positions)
     kwargs = dict(index_topk=INDEX_TOPK, index_kpool=POOL_SIZE, max_pool_seq_len=max_pool_seq_len)
     if use_graph:
         # Exercise the model's packed-tail path and a strided SFA output view.
         backing_output = torch.full((2 * num_tokens, 2080), 77, dtype=torch.int32, device="npu")
         output_buffer = backing_output[::2]
         kwargs.update(output_buffer=output_buffer, pack_tail=True)
-    # Force several token chunks without a large scratch allocation. This also
-    # checks that request lookup uses the batch-global token offset.
-    monkeypatch.setattr(indexer, "TRITON_SCORES_CHUNK_BYTES", max(1, max_pool_seq_len) * 4 * 3)
+    # Keep the shared-query case together. Other cases force token chunking
+    # and check that request lookup uses the batch-global token offset.
+    chunk_rows = num_tokens if shared_query else 3
+    monkeypatch.setattr(indexer, "TRITON_SCORES_CHUNK_BYTES", max(1, max_pool_seq_len) * 4 * chunk_rows)
 
     if use_graph:
         indexer.glm5_next_lightning_indexer_triton(*args, **kwargs)
@@ -91,7 +104,10 @@ def test_pool_selection_real_shape_paging_and_causal_tail(max_pool_seq_len, use_
         if step:
             query.copy_(torch.randn(num_tokens, NUM_HEADS, HEAD_DIM, generator=generator).bfloat16().npu())
             weights.copy_(torch.randn(num_tokens, NUM_HEADS, generator=generator).bfloat16().npu())
-            pool_lens[2] //= 2
+            pool_lens[-1] //= 2
+            if shared_query:
+                ends[0] = 4
+                device_ends.copy_(ends)
             positions[3:5] = torch.tensor([15, 16])
             device_lens.copy_(pool_lens)
             device_positions.copy_(positions)

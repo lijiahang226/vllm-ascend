@@ -9,6 +9,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
 TRITON_POOL_CHUNK_SIZE = 128
+TRITON_SHARED_QUERY_MAX_TOKENS = 8
 TRITON_SCORES_CHUNK_BYTES = 256 * 1024 * 1024
 TRITON_MAX_PROGRAMS = 256
 TRITON_INDEX_BLOCK = 256
@@ -139,6 +140,65 @@ def _glm5_next_lightning_indexer_score_kernel(
                 scores = tl.sum(k.to(tl.float32) * weighted_query[None, :], axis=1)
                 scores = tl.where(valid & (scores == scores), tl.minimum(tl.maximum(scores, LOWEST), -LOWEST), LOWEST)
             tl.store(output + row * max_pool_seq_len + pools, scores, pools < max_pool_seq_len)
+
+
+@triton.jit(do_not_specialize=["token_offset", "rows", "max_pool_seq_len", "num_cache_blocks"])
+def _glm5_next_lightning_indexer_shared_query_score_kernel(
+    qbar,
+    cache,
+    query_ends,
+    pool_lens,
+    block_table,
+    positions,
+    output,
+    token_offset,
+    rows,
+    max_pool_seq_len,
+    num_cache_blocks,
+    cache_stride_b: tl.constexpr,
+    cache_stride_t: tl.constexpr,
+    cache_stride_d: tl.constexpr,
+    table_stride_p: tl.constexpr,
+    CACHE_BLOCK: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    POOL: tl.constexpr,
+    QUERY_ROWS: tl.constexpr,
+    BLOCK_POOL: tl.constexpr,
+    LOWEST: tl.constexpr,
+):
+    # All rows belong to one request. Keep metadata and queries outside the
+    # pool loop, and load each paged K tile once for the entire query group.
+    row = tl.arange(0, QUERY_ROWS)
+    token = row + token_offset
+    live = (row < rows) & (token < tl.load(query_ends))
+    position = tl.load(positions + token, row < rows, other=0).to(tl.int32)
+    visible = tl.minimum((position + 1) // POOL, tl.load(pool_lens))
+    max_visible = tl.minimum(tl.max(tl.where(live, visible, 0), axis=0), max_pool_seq_len)
+    dims = tl.arange(0, HEAD_DIM)
+    weighted_query = tl.load(qbar + row[:, None] * HEAD_DIM + dims[None, :], (row < rows)[:, None], other=0)
+    chunks = tl.cdiv(max_pool_seq_len, BLOCK_POOL)
+    for chunk in range(tl.program_id(0), chunks, tl.num_programs(0)):
+        pool_start = chunk * BLOCK_POOL
+        pools = pool_start + tl.arange(0, BLOCK_POOL)
+        scores = tl.full((QUERY_ROWS, BLOCK_POOL), LOWEST, tl.float32)
+        if pool_start < max_visible:
+            block = tl.load(block_table + (pool_start // CACHE_BLOCK) * table_stride_p)
+            block = tl.minimum(tl.maximum(block, 0), num_cache_blocks - 1).to(tl.int64)
+            # BLOCK_POOL divides CACHE_BLOCK, so a tile cannot cross a page.
+            # Only the scalar page base uses int64, including for large caches.
+            page_base = cache + block * cache_stride_b
+            offsets = (pools % CACHE_BLOCK)[:, None] * cache_stride_t + dims[None, :] * cache_stride_d
+            keys = tl.load(page_base + offsets, (pools < max_visible)[:, None], other=0).to(tl.float32)
+            # Bound QUERY_ROWS * BLOCK_POOL to the original pool tile size.
+            # The FP32 product remains at most 128 x HEAD_DIM elements.
+            scores = tl.sum(weighted_query[:, None, :] * keys[None, :, :], axis=2)
+            valid = live[:, None] & (pools[None, :] < visible[:, None])
+            scores = tl.where(valid & (scores == scores), tl.minimum(tl.maximum(scores, LOWEST), -LOWEST), LOWEST)
+        tl.store(
+            output + row[:, None] * max_pool_seq_len + pools[None, :],
+            scores,
+            (row < rows)[:, None] & (pools < max_pool_seq_len)[None, :],
+        )
 
 
 @triton.jit(do_not_specialize=["rows", "token_offset", "selected", "last_query"])
@@ -291,37 +351,74 @@ def glm5_next_lightning_indexer_triton(
                 .contiguous()
             )
             scores = torch.empty((rows, max_pool_seq_len), dtype=torch.float32, device=query.device)
-            block_pool = TRITON_POOL_CHUNK_SIZE if index32 else indexer_cache.shape[1]
-            outer_pool = max(TRITON_PREFILL_POOL_TILE, block_pool) if rows >= TRITON_PREFILL_MIN_TOKENS else block_pool
-            chunks = triton.cdiv(max_pool_seq_len, outer_pool)
-            _glm5_next_lightning_indexer_score_kernel[(min(rows * chunks, TRITON_MAX_PROGRAMS),)](
-                qbar,
-                cache,
-                cum_query_lens,
-                indexer_seq_lens,
-                indexer_block_table,
-                positions,
-                scores,
-                start,
-                rows,
-                max_pool_seq_len,
-                cum_query_lens.numel(),
-                indexer_cache.shape[0],
-                0 if packed_cache else cache.stride(0),
-                cache.stride(1),
-                cache.stride(3),
-                *indexer_block_table.stride(),
-                indexer_cache.shape[1],
-                QUERY_END_SENTINEL,
-                next_power_of_2(cum_query_lens.numel()),
-                head_dim,
-                index_kpool,
-                block_pool,
-                NEG_INF_SENTINEL,
-                index32,
-                outer_pool,
-                packed_cache,
+            shared_query = (
+                not packed_cache
+                and cum_query_lens.numel() == 1
+                and 1 < rows <= TRITON_SHARED_QUERY_MAX_TOKENS
+                and num_tokens <= TRITON_SHARED_QUERY_MAX_TOKENS
+                and indexer_cache.shape[1] == next_power_of_2(indexer_cache.shape[1])
             )
+            if shared_query:
+                query_rows = next_power_of_2(rows)
+                block_pool = min(indexer_cache.shape[1], TRITON_POOL_CHUNK_SIZE // query_rows)
+                chunks = triton.cdiv(max_pool_seq_len, block_pool)
+                _glm5_next_lightning_indexer_shared_query_score_kernel[(min(chunks, TRITON_MAX_PROGRAMS),)](
+                    qbar,
+                    indexer_cache,
+                    cum_query_lens,
+                    indexer_seq_lens,
+                    indexer_block_table,
+                    positions,
+                    scores,
+                    start,
+                    rows,
+                    max_pool_seq_len,
+                    indexer_cache.shape[0],
+                    indexer_cache.stride(0),
+                    indexer_cache.stride(1),
+                    indexer_cache.stride(3),
+                    indexer_block_table.stride(1),
+                    indexer_cache.shape[1],
+                    head_dim,
+                    index_kpool,
+                    query_rows,
+                    block_pool,
+                    NEG_INF_SENTINEL,
+                )
+            else:
+                block_pool = TRITON_POOL_CHUNK_SIZE if index32 else indexer_cache.shape[1]
+                outer_pool = (
+                    max(TRITON_PREFILL_POOL_TILE, block_pool) if rows >= TRITON_PREFILL_MIN_TOKENS else block_pool
+                )
+                chunks = triton.cdiv(max_pool_seq_len, outer_pool)
+                _glm5_next_lightning_indexer_score_kernel[(min(rows * chunks, TRITON_MAX_PROGRAMS),)](
+                    qbar,
+                    cache,
+                    cum_query_lens,
+                    indexer_seq_lens,
+                    indexer_block_table,
+                    positions,
+                    scores,
+                    start,
+                    rows,
+                    max_pool_seq_len,
+                    cum_query_lens.numel(),
+                    indexer_cache.shape[0],
+                    0 if packed_cache else cache.stride(0),
+                    cache.stride(1),
+                    cache.stride(3),
+                    *indexer_block_table.stride(),
+                    indexer_cache.shape[1],
+                    QUERY_END_SENTINEL,
+                    next_power_of_2(cum_query_lens.numel()),
+                    head_dim,
+                    index_kpool,
+                    block_pool,
+                    NEG_INF_SENTINEL,
+                    index32,
+                    outer_pool,
+                    packed_cache,
+                )
             topk_scores, pool_ids = torch.topk(scores, selected, dim=1)
             # Ascend scalarizes Triton's int64-to-int32 vector conversion.
             # Convert once before expanding each selected pool into tokens.
