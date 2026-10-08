@@ -8,11 +8,10 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
-from vllm_ascend.ops.triton.triton_utils import extract_slice, get_vectorcore_num, init_device_properties_triton
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
 TRITON_POOL_CHUNK_SIZE = 128
 TRITON_SHARED_QUERY_MAX_TOKENS = 8
-TRITON_SHARED_QUERY_BLOCK = 2
 TRITON_SCORES_CHUNK_BYTES = 256 * 1024 * 1024
 TRITON_MAX_PROGRAMS = 256
 TRITON_INDEX_BLOCK = 256
@@ -166,16 +165,14 @@ def _glm5_next_lightning_indexer_shared_query_score_kernel(
     HEAD_DIM: tl.constexpr,
     POOL: tl.constexpr,
     QUERY_ROWS: tl.constexpr,
-    QUERY_BLOCK: tl.constexpr,
     BLOCK_POOL: tl.constexpr,
     LOWEST: tl.constexpr,
 ):
     # All rows belong to one request. Keep metadata and queries outside the
-    # pool loop, and load each paged K tile once for all query pairs.
+    # pool loop, and load each paged K tile once for the entire query group.
     row = tl.arange(0, QUERY_ROWS)
     token = row + token_offset
-    query_end = tl.load(query_ends)
-    live = (row < rows) & (token < query_end)
+    live = (row < rows) & (token < tl.load(query_ends))
     position = tl.load(positions + token, row < rows, other=0).to(tl.int32)
     visible = tl.minimum((position + 1) // POOL, tl.load(pool_lens))
     max_visible = tl.minimum(tl.max(tl.where(live, visible, 0), axis=0), max_pool_seq_len)
@@ -185,6 +182,7 @@ def _glm5_next_lightning_indexer_shared_query_score_kernel(
     for chunk in range(tl.program_id(0), chunks, tl.num_programs(0)):
         pool_start = chunk * BLOCK_POOL
         pools = pool_start + tl.arange(0, BLOCK_POOL)
+        scores = tl.full((QUERY_ROWS, BLOCK_POOL), LOWEST, tl.float32)
         if pool_start < max_visible:
             block = tl.load(block_table + (pool_start // CACHE_BLOCK) * table_stride_p)
             block = tl.minimum(tl.maximum(block, 0), num_cache_blocks - 1).to(tl.int64)
@@ -193,34 +191,16 @@ def _glm5_next_lightning_indexer_shared_query_score_kernel(
             page_base = cache + block * cache_stride_b
             offsets = (pools % CACHE_BLOCK)[:, None] * cache_stride_t + dims[None, :] * cache_stride_d
             keys = tl.load(page_base + offsets, (pools < max_visible)[:, None], other=0).to(tl.float32)
-            # Reuse the resident K tile while bounding each FP32 product to a
-            # query pair. Runtime rows avoid computing power-of-two padding pairs.
-            for query_start in range(0, rows, QUERY_BLOCK):
-                pair_rows = query_start + tl.arange(0, QUERY_BLOCK)
-                pair_live = (pair_rows < rows) & (pair_rows + token_offset < query_end)
-                pair_visible = extract_slice(visible, (query_start,), (QUERY_BLOCK,), (1,))
-                scores = tl.full((QUERY_BLOCK, BLOCK_POOL), LOWEST, tl.float32)
-                if pool_start < tl.max(tl.where(pair_live, pair_visible, 0), axis=0):
-                    pair_query = extract_slice(weighted_query, (query_start, 0), (QUERY_BLOCK, HEAD_DIM), (1, 1))
-                    scores = tl.sum(pair_query[:, None, :] * keys[None, :, :], axis=2)
-                    valid = pair_live[:, None] & (pools[None, :] < pair_visible[:, None])
-                    scores = tl.where(
-                        valid & (scores == scores), tl.minimum(tl.maximum(scores, LOWEST), -LOWEST), LOWEST
-                    )
-                tl.store(
-                    output + pair_rows[:, None] * max_pool_seq_len + pools[None, :],
-                    scores,
-                    (pair_rows < rows)[:, None] & (pools < max_pool_seq_len)[None, :],
-                )
-        else:
-            # Unvisited graph capacity still needs sentinels for torch.topk;
-            # clear it without creating a K buffer or slicing query pairs.
-            scores = tl.full((QUERY_ROWS, BLOCK_POOL), LOWEST, tl.float32)
-            tl.store(
-                output + row[:, None] * max_pool_seq_len + pools[None, :],
-                scores,
-                (row < rows)[:, None] & (pools < max_pool_seq_len)[None, :],
-            )
+            # Bound QUERY_ROWS * BLOCK_POOL to the original pool tile size.
+            # The FP32 product remains at most 128 x HEAD_DIM elements.
+            scores = tl.sum(weighted_query[:, None, :] * keys[None, :, :], axis=2)
+            valid = live[:, None] & (pools[None, :] < visible[:, None])
+            scores = tl.where(valid & (scores == scores), tl.minimum(tl.maximum(scores, LOWEST), -LOWEST), LOWEST)
+        tl.store(
+            output + row[:, None] * max_pool_seq_len + pools[None, :],
+            scores,
+            (row < rows)[:, None] & (pools < max_pool_seq_len)[None, :],
+        )
 
 
 @triton.jit(do_not_specialize=["rows", "token_offset", "selected", "last_query"])
@@ -382,7 +362,7 @@ def glm5_next_lightning_indexer_triton(
             )
             if shared_query:
                 query_rows = next_power_of_2(rows)
-                block_pool = min(indexer_cache.shape[1], TRITON_POOL_CHUNK_SIZE // TRITON_SHARED_QUERY_BLOCK)
+                block_pool = min(indexer_cache.shape[1], TRITON_POOL_CHUNK_SIZE // query_rows)
                 chunks = triton.cdiv(max_pool_seq_len, block_pool)
                 init_device_properties_triton()
                 _glm5_next_lightning_indexer_shared_query_score_kernel[(min(chunks, get_vectorcore_num()),)](
@@ -405,7 +385,6 @@ def glm5_next_lightning_indexer_triton(
                     head_dim,
                     index_kpool,
                     query_rows,
-                    TRITON_SHARED_QUERY_BLOCK,
                     block_pool,
                     NEG_INF_SENTINEL,
                 )
