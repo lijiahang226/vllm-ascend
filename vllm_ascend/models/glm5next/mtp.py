@@ -10,6 +10,7 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
@@ -46,7 +47,17 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
+        # Shard across TP only, then restore the full hidden state for MTP.
+        # Keep the projection unquantized, matching the checkpoint and nn.Linear.
+        self.eh_proj = ColumnParallelLinear(
+            config.hidden_size * 2,
+            config.hidden_size,
+            bias=False,
+            gather_output=True,
+            quant_config=None,
+            prefix=f"{prefix}.eh_proj",
+            return_bias=False,
+        )
 
         # Reserve room for the incomplete pool tail and align the sparse MLA
         # buffer width to BLOCK_N=128.
