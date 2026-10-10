@@ -5,7 +5,7 @@
 import torch
 from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.distributed import divide
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import (
@@ -306,10 +306,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self._forward(
             qkv_proj_states=qkv,
             g1=g1,
+            g2=g2,
             beta=beta,
             core_attn_out=core_attn_out,
         )
-        core_attn_out = self.o_norm(core_attn_out, g2)
         core_attn_out = core_attn_out.reshape(core_attn_out.size(1), -1)
         return self.o_proj(core_attn_out)[0]
 
@@ -318,6 +318,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self,
         qkv_proj_states: torch.Tensor,
         g1: torch.Tensor,
+        g2: torch.Tensor,
         beta: torch.Tensor,
         core_attn_out: torch.Tensor,
     ) -> None:
@@ -338,6 +339,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         non_spec_query_start_loc = attn_metadata_narrowed.non_spec_query_start_loc
         non_spec_state_indices_tensor = attn_metadata_narrowed.non_spec_state_indices_tensor  # noqa: E501
         num_actual_tokens = attn_metadata_narrowed.num_actual_tokens
+        if num_actual_tokens == 0:
+            core_attn_out.zero_()
+            return
         # Spec-decode metadata (all None when speculative decoding is disabled).
         spec_sequence_masks = attn_metadata_narrowed.spec_sequence_masks
         spec_query_start_loc = attn_metadata_narrowed.spec_query_start_loc
@@ -479,44 +483,56 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             )
             core_attn_out[0].index_copy_(0, spec_token_indx, spec_output[0])
 
-        if q_ns is None:
-            return
-        q_ns, k_ns, v_ns = rearrange(q_ns), rearrange(k_ns), rearrange(v_ns)
-        metadata = attn_metadata_narrowed
-        decode_tokens = metadata.num_decode_tokens if metadata.num_prefills > 0 else q_ns.shape[1]
-        output = None
-        if metadata.num_decodes > 0:
-            output = recurrent_kda(
-                q_ns[:, :decode_tokens],
-                k_ns[:, :decode_tokens],
-                v_ns[:, :decode_tokens],
-                g1_ns[:, :decode_tokens],
-                beta_ns[:, :decode_tokens],
-                recurrent_state,
-                non_spec_query_start_loc[: metadata.num_decodes + 1],
-                non_spec_state_indices_tensor,
-                self.A_log,
-                self.dt_bias,
-                lower_bound,
-            )
-        if metadata.num_prefills > 0:
-            prefill_output = chunk_kda(
-                q_ns[:, decode_tokens:],
-                k_ns[:, decode_tokens:],
-                v_ns[:, decode_tokens:],
-                g1_ns[:, decode_tokens:],
-                beta_ns[:, decode_tokens:],
-                recurrent_state,
-                metadata.prefill_state_indices,
-                metadata.prefill_has_initial_state,
-                metadata.non_spec_prefill_metadata.chunk,
-                self.A_log,
-                self.dt_bias,
-                lower_bound,
-            )
-            output = prefill_output if output is None else torch.cat((output, prefill_output), dim=1)
-        assert output is not None
-        if use_spec:
-            core_attn_out[0].index_copy_(0, non_spec_token_indx, output[0])
+        if q_ns is not None:
+            q_ns, k_ns, v_ns = rearrange(q_ns), rearrange(k_ns), rearrange(v_ns)
+            metadata = attn_metadata_narrowed
+            decode_tokens = metadata.num_decode_tokens if metadata.num_prefills > 0 else q_ns.shape[1]
+            output = None
+            if metadata.num_decodes > 0:
+                output = recurrent_kda(
+                    q_ns[:, :decode_tokens],
+                    k_ns[:, :decode_tokens],
+                    v_ns[:, :decode_tokens],
+                    g1_ns[:, :decode_tokens],
+                    beta_ns[:, :decode_tokens],
+                    recurrent_state,
+                    non_spec_query_start_loc[: metadata.num_decodes + 1],
+                    non_spec_state_indices_tensor,
+                    self.A_log,
+                    self.dt_bias,
+                    lower_bound,
+                )
+            if metadata.num_prefills > 0:
+                prefill_output = chunk_kda(
+                    q_ns[:, decode_tokens:],
+                    k_ns[:, decode_tokens:],
+                    v_ns[:, decode_tokens:],
+                    g1_ns[:, decode_tokens:],
+                    beta_ns[:, decode_tokens:],
+                    recurrent_state,
+                    metadata.prefill_state_indices,
+                    metadata.prefill_has_initial_state,
+                    metadata.non_spec_prefill_metadata.chunk,
+                    self.A_log,
+                    self.dt_bias,
+                    lower_bound,
+                )
+                output = prefill_output if output is None else torch.cat((output, prefill_output), dim=1)
+            assert output is not None
+            if use_spec:
+                core_attn_out[0].index_copy_(0, non_spec_token_indx, output[0])
+            else:
+                core_attn_out[0, : output.shape[1]].copy_(output[0])
+
+        # Match K3: normalize the merged live region, then define the padding.
+        normalized = self.o_norm(core_attn_out[:, :num_actual_tokens], g2[:num_actual_tokens])
+        core_attn_out[:, :num_actual_tokens].copy_(normalized)
+        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            # Python slice bounds stay fixed during replay; device lengths do not.
+            live_tokens = spec_query_start_loc[-1] if use_spec else non_spec_query_start_loc[-1]
+            if use_spec and q_ns is not None:
+                live_tokens = live_tokens + non_spec_query_start_loc[-1]
+            valid = torch.arange(core_attn_out.shape[1], device=core_attn_out.device) < live_tokens
+            core_attn_out.masked_fill_(~valid[None, :, None, None], 0)
         else:
-            core_attn_out[0, : output.shape[1]].copy_(output[0])
+            core_attn_out[:, num_actual_tokens:].zero_()

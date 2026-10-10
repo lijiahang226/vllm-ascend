@@ -26,6 +26,7 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
     # dtype and [width, q|k|v] ordering in the cached packed weight.
     for index, name in enumerate(("q_conv1d", "k_conv1d", "v_conv1d"), start=1):
         setattr(layer, name, SimpleNamespace(bias=None, weight=torch.full((128, 1, 4), float(index))))
+    layer.o_norm = lambda x, g: x * torch.sigmoid(g)
     layer.A_log = torch.zeros(1)
     layer.dt_bias = torch.zeros(128)
     tokens = 5 if speculative else 4
@@ -80,7 +81,11 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
                 num_accepted_tokens=metadata.num_accepted_tokens,
             )
         )
-    monkeypatch.setattr(model_kda, "get_forward_context", lambda: SimpleNamespace(attn_metadata={"layer": metadata}))
+    monkeypatch.setattr(
+        model_kda,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={"layer": metadata}, cudagraph_runtime_mode=model_kda.CUDAGraphMode.NONE),
+    )
     conv_calls = []
     conv_entry = model_kda.causal_conv1d
 
@@ -135,10 +140,12 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
     monkeypatch.setattr(model_kda, "chunk_kda", prefill)
     qkv = torch.arange(1, tokens + 1, dtype=torch.bfloat16)[:, None].expand(tokens, 384).clone()
     out = torch.full((1, tokens + 1, 1, 128), float("nan"), dtype=torch.bfloat16)
-    layer._forward(qkv, torch.zeros(1, tokens, 1, 128), torch.zeros(1, tokens, 1), out)
+    gate = torch.zeros(tokens + 1, 1, 128)
+    gate[tokens:] = torch.nan
+    layer._forward(qkv, torch.zeros(1, tokens, 1, 128), gate, torch.zeros(1, tokens, 1), out)
     expected = torch.arange(1, tokens + 1, dtype=torch.bfloat16) * 3
     expected[: 2 if speculative else 1] = torch.arange(1, 3 if speculative else 2) * 2
-    torch.testing.assert_close(out[0, :tokens, 0, 0], expected)
+    torch.testing.assert_close(out[0, :tokens, 0, 0], expected * 0.5)
     assert torch.count_nonzero(out[:, tokens:]) == 0
     assert calls == ["recurrent", "prefill"]
     assert conv_calls == ([1, 0] if speculative else [0])
@@ -157,3 +164,65 @@ def test_unsupported_conv_width_is_rejected_before_execution(monkeypatch, width,
     )
     with pytest.raises(ValueError, match="causal-conv requires"):
         model_kda.Glm5NextLinearAttention(config, vllm_config)
+
+
+@pytest.mark.parametrize("mode", ["decode", "spec", "mixed"])
+def test_full_graph_padding_uses_device_length_after_norm(monkeypatch, mode):
+    speculative = mode != "decode"
+    mixed = mode == "mixed"
+    capacity, captured_tokens, live_tokens = 8, 6, 4
+    starts = torch.tensor([0, live_tokens // 2 if mixed else live_tokens], dtype=torch.int32)
+    accepted = torch.ones(1, dtype=torch.int32) if speculative else None
+    conv_meta = SimpleNamespace(query_start_loc=starts, cache_indices=torch.tensor([0]), num_accepted_tokens=accepted)
+    metadata = object.__new__(model_kda.GDNAttentionMetadata)
+    values = dict(
+        num_actual_tokens=captured_tokens,
+        num_prefills=0,
+        num_decodes=1 if mixed or not speculative else 0,
+        num_decode_tokens=captured_tokens,
+        num_spec_decodes=1 if speculative else 0,
+        spec_sequence_masks=torch.tensor([True]) if speculative else None,
+        spec_query_start_loc=starts if speculative else None,
+        non_spec_query_start_loc=starts if mixed or not speculative else None,
+        spec_state_indices_tensor=torch.tensor([[0, 1, 2, 3, 4, 5]]) if speculative else None,
+        non_spec_state_indices_tensor=torch.tensor([0]) if mixed or not speculative else None,
+        spec_token_indx=(torch.arange(0, captured_tokens, 2) if mixed else torch.arange(captured_tokens))
+        if speculative
+        else None,
+        non_spec_token_indx=torch.arange(1, captured_tokens, 2) if mixed else None,
+        num_accepted_tokens=accepted,
+        spec_decode_metadata=SimpleNamespace(spec_causal_conv1d=conv_meta),
+        non_spec_decode_metadata=SimpleNamespace(causal_conv1d=conv_meta),
+    )
+    for name, value in values.items():
+        setattr(metadata, name, value)
+    monkeypatch.setattr(
+        model_kda,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={"layer": metadata}, cudagraph_runtime_mode=model_kda.CUDAGraphMode.FULL),
+    )
+    monkeypatch.setattr(model_kda, "causal_conv1d", lambda x, *args, **kwargs: x)
+    monkeypatch.setattr(model_kda, "recurrent_kda", lambda q, *args: q.clone())
+    layer = SimpleNamespace(
+        prefix="layer",
+        local_num_heads=1,
+        head_dim=128,
+        local_projection_size=128,
+        kda_lower_bound=-4.0,
+        kv_cache=(torch.zeros(1, 4, 384), torch.zeros(1, 1, 128, 128)),
+        _conv_state_dim_first=False,
+        _merged_conv_weight=torch.zeros(4, 384),
+        A_log=torch.zeros(1),
+        dt_bias=torch.zeros(128),
+        o_norm=lambda x, g: x * torch.sigmoid(g),
+    )
+    qkv = torch.ones(capacity, 384)
+    qkv[live_tokens:] = torch.nan
+    gate = torch.zeros(capacity, 1, 128)
+    gate[live_tokens:] = torch.nan
+    output = torch.full((1, capacity, 1, 128), torch.nan)
+    model_kda.Glm5NextLinearAttention._forward(
+        layer, qkv, torch.zeros(1, capacity, 1, 128), gate, torch.zeros(1, capacity, 1), output
+    )
+    torch.testing.assert_close(output[:, :live_tokens], torch.full_like(output[:, :live_tokens], 0.5))
+    assert torch.count_nonzero(output[:, live_tokens:]) == 0

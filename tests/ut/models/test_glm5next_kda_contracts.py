@@ -12,7 +12,7 @@ import vllm_ascend.ops.kda as kda_ops
 
 @pytest.mark.parametrize("accepted", [None, [1, 2, 1]])
 @pytest.mark.parametrize("qkv_padding", [0, 64])
-def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, qkv_padding):
+def test_recurrent_raw_gates_rollback_slots_and_operator_output(monkeypatch, accepted, qkv_padding):
     q, k, v = (torch.ones(1, 4, 1, 128 + qkv_padding * i, dtype=torch.bfloat16)[..., :128] for i in (1, 2, 3))
     gate = q * 2
     beta = torch.zeros(1, 4, 1, dtype=torch.bfloat16)
@@ -41,11 +41,11 @@ def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, q
     out = kda.recurrent_kda(
         q, k, v, gate, beta, state, starts, slots, torch.zeros(1), torch.zeros(128), -4, accepted_tensor
     )
-    # Clear unwritten padding in place without hiding NaNs in real tokens.
+    # The model owns padding; preserve the native result and real-token NaNs.
     assert out is result
     assert torch.isnan(out[0, 0, 0, 0])
     torch.testing.assert_close(out[:, 1:3], q[:, 1:3])
-    assert torch.count_nonzero(out[:, 3:]) == 0
+    assert torch.isnan(out[:, 3:]).all()
 
 
 @pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
