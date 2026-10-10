@@ -210,7 +210,7 @@ def test_rope_sfa_preserves_cache_composition_and_device_dispatch(sfa_c8, li_c8)
 
 
 @pytest.mark.parametrize("a5", [False, True])
-def test_nope_operator_masks_unwritten_graph_rows(monkeypatch, a5):
+def test_nope_operator_padding_contract(monkeypatch, a5):
     query = torch.ones(3, 2, 128)
     cache = torch.zeros(2, 128, 1, 128)
     metadata = SimpleNamespace(
@@ -222,9 +222,11 @@ def test_nope_operator_masks_unwritten_graph_rows(monkeypatch, a5):
         block_size=128,
     )
 
+    result = query.clone()
+    result[0, 0, 0] = float("nan")
+    result[2] = float("nan") if a5 else 0
+
     def op(*args, **kwargs):
-        result = query.clone()
-        result[2] = float("nan")
         return (result,)
 
     if a5:
@@ -232,8 +234,10 @@ def test_nope_operator_masks_unwritten_graph_rows(monkeypatch, a5):
     else:
         monkeypatch.setattr(torch.ops._C_ascend, "npu_sparse_flash_attention", op, raising=False)
     output = sparse_mla.sparse_mla(query, cache, torch.tensor([[[0]], [[0]], [[-1]]], dtype=torch.int32), metadata, 0.5)
-    torch.testing.assert_close(output[:2], query[:2])
+    torch.testing.assert_close(output[:2], result[:2], equal_nan=True)
     assert (output[2] == 0).all()
+    if not a5:
+        assert output is result
 
 
 def test_a5_smla_uses_original_cache_sorted_indices_and_stable_metadata(monkeypatch):

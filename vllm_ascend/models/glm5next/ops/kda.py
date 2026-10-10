@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM bounded-gate contracts for the AscendC KDA operators."""
 
-import torch
-
 from vllm_ascend.models.glm5next.ops.state_ops import gather_initial_states, scatter_states
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
 
@@ -29,7 +27,7 @@ def recurrent_kda(
     state_indices = state_indices[:num_seqs]
     if num_accepted_tokens is not None:
         num_accepted_tokens = num_accepted_tokens[:num_seqs]
-    output = run_recurrent_kda(
+    return run_recurrent_kda(
         q,
         k,
         v,
@@ -44,8 +42,6 @@ def recurrent_kda(
         beta_is_preprocessed=False,
         num_accepted_tokens=num_accepted_tokens,
     )
-    valid = torch.arange(q.shape[1], device=q.device) < cu_seqlens[-1]
-    return output.masked_fill(~valid[None, :, None, None], 0)
 
 
 def chunk_kda(
