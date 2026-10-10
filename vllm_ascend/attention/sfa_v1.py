@@ -156,12 +156,10 @@ def sparse_mla(query, cache, indices, metadata, scale):
             return_softmax_lse=False,
         )
     output = result[0]
-    if metadata.smla_metadata is not None:
-        # The external CANN SparseFlashMla op does not guarantee graph-padding
-        # initialization. The in-tree SparseFlashAttention kernel clears its tail.
-        valid = torch.arange(query.shape[0], device=query.device) < metadata.query_start_loc[-1]
-        return output.masked_fill(~valid[:, None, None], 0)
-    return output
+    # Both operators can leave graph-capacity rows unwritten. Clear padding
+    # in place before projections without allocating another output tensor.
+    valid = torch.arange(query.shape[0], device=query.device) < metadata.query_start_loc[-1]
+    return output.masked_fill_(~valid[:, None, None], 0)
 
 
 class SparseMLAMetadataState:

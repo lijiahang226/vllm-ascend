@@ -21,7 +21,7 @@ def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, q
     slots = torch.tensor([[2, 3], [5, 6], [0, 0]], dtype=torch.int32)
     accepted_tensor = None if accepted is None else torch.tensor(accepted, dtype=torch.int32)
     result = q.clone()
-    result[:, 3:] = 0
+    result[:, 3:] = float("nan")
     result[:, 0, 0, 0] = float("nan")
 
     def recurrent(q_arg, k_arg, v_arg, gate_arg, beta_arg, state_arg, cu, ids, a_log, bias, **kwargs):
@@ -41,8 +41,7 @@ def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, q
     out = kda.recurrent_kda(
         q, k, v, gate, beta, state, starts, slots, torch.zeros(1), torch.zeros(128), -4, accepted_tensor
     )
-    # The native kernel owns padding initialization; preserve its output and
-    # any NaNs in real tokens instead of allocating a second masked tensor.
+    # Clear unwritten padding in place without hiding NaNs in real tokens.
     assert out is result
     assert torch.isnan(out[0, 0, 0, 0])
     torch.testing.assert_close(out[:, 1:3], q[:, 1:3])

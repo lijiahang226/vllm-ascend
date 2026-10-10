@@ -224,7 +224,8 @@ def test_nope_operator_padding_contract(monkeypatch, a5):
 
     result = query.clone()
     result[0, 0, 0] = float("nan")
-    result[2] = float("nan") if a5 else 0
+    result[2] = float("nan")
+    expected = result[:2].clone()
 
     def op(*args, **kwargs):
         return (result,)
@@ -234,10 +235,9 @@ def test_nope_operator_padding_contract(monkeypatch, a5):
     else:
         monkeypatch.setattr(torch.ops._C_ascend, "npu_sparse_flash_attention", op, raising=False)
     output = sparse_mla.sparse_mla(query, cache, torch.tensor([[[0]], [[0]], [[-1]]], dtype=torch.int32), metadata, 0.5)
-    torch.testing.assert_close(output[:2], result[:2], equal_nan=True)
+    torch.testing.assert_close(output[:2], expected, equal_nan=True)
     assert (output[2] == 0).all()
-    if not a5:
-        assert output is result
+    assert output is result
 
 
 def test_a5_smla_uses_original_cache_sorted_indices_and_stable_metadata(monkeypatch):

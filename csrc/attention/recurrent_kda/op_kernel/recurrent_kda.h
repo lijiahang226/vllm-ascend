@@ -236,7 +236,6 @@ public:
             ReleaseEvents();
             return;
         }
-        InitPaddingOutput();
         for (uint64_t batch_i = 0; batch_i < B_; batch_i++) {
             int64_t seq0 = SequenceStart(batch_i);
             int64_t seq1 = SequenceEnd(batch_i);
@@ -272,28 +271,6 @@ public:
     }
 
 private:
-    __aicore__ inline void InitPaddingOutput()
-    {
-        uint64_t actualTokens = hasCuSeqlens_ ? static_cast<uint64_t>(LoadCuSeqlens(B_)) : T_;
-        if (actualTokens * NV_ + blockIdx >= T_ * NV_) {
-            return;
-        }
-        // Graph replay can shrink the live prefix without changing output capacity.
-        // Only clear the unwritten tail; valid outputs and state updates are disjoint.
-        LocalTensor<outType> zeros = attnOutQueue_.AllocTensor<outType>();
-        Duplicate(zeros.template ReinterpretCast<uint16_t>(), static_cast<uint16_t>(0), vStep_);
-        attnOutQueue_.EnQue<outType>(zeros);
-        zeros = attnOutQueue_.DeQue<outType>();
-        for (uint64_t head = actualTokens * NV_ + blockIdx; head < T_ * NV_; head += GetBlockNum()) {
-            for (uint64_t v = 0; v < realV_; v += vStep_) {
-                uint32_t size = v + vStep_ > realV_ ? realV_ - v : vStep_;
-                DataCopyParams params{1, static_cast<uint16_t>(size * sizeof(outType)), 0, 0};
-                DataCopyPad(attnOutGm_[head * realV_ + v], zeros, params);
-            }
-        }
-        attnOutQueue_.FreeTensor(zeros);
-    }
-
     __aicore__ inline bool ValidateCuSeqlens() const
     {
         if (!hasCuSeqlens_) {
