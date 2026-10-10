@@ -111,6 +111,14 @@ def sparse_mla(query, cache, indices, metadata, scale):
         sentinel = torch.iinfo(torch.int32).max
         sorted_indices = torch.where(indices >= 0, indices, sentinel).sort(dim=-1).values
         sorted_indices = torch.where(sorted_indices == sentinel, -1, sorted_indices)
+        # MTP can reuse an earlier step's indices while positions advance.
+        # Plan from the actual valid prefix, including the selected pool tail,
+        # rather than estimating its length from the current position.
+        valid = torch.arange(query.shape[0], device=query.device) < metadata.query_start_loc[-1]
+        lengths = metadata.smla_topk_length[: query.shape[0]]
+        metadata.smla_topk_length.zero_()
+        lengths.copy_((sorted_indices >= 0).sum(dim=-1, dtype=torch.int32).masked_fill(~valid[:, None], 0))
+        build_smla_metadata(metadata, metadata.smla_metadata, query.shape[1], query.shape[2], sorted_indices.shape[-1])
         result = sparse_flash_mla(
             query.contiguous(),
             ori_kv=cache,
@@ -118,7 +126,7 @@ def sparse_mla(query, cache, indices, metadata, scale):
             ori_block_table=metadata.block_table,
             cu_seqlens_q=metadata.query_start_loc,
             seqused_ori_kv=metadata.seq_lens,
-            ori_topk_length=metadata.smla_topk_length[: query.shape[0]],
+            ori_topk_length=lengths,
             sinks=None,
             metadata=metadata.smla_metadata,
             softmax_scale=scale,
@@ -159,7 +167,6 @@ def sparse_mla(query, cache, indices, metadata, scale):
     if metadata.smla_metadata is not None:
         # The external CANN SparseFlashMla op does not guarantee graph-padding
         # initialization. The in-tree SparseFlashAttention kernel clears its tail.
-        valid = torch.arange(query.shape[0], device=query.device) < metadata.query_start_loc[-1]
         return output.masked_fill(~valid[:, None, None], 0)
     return output
 
@@ -167,11 +174,11 @@ def sparse_mla(query, cache, indices, metadata, scale):
 class SparseMLAMetadataState:
     """Persistent operator buffers for NoPE within the shared SFA builder.
 
-    Indexers supply their visible index counts. Pool construction and scoring
-    remain entirely outside attention metadata and operator dispatch.
+    Sparse MLA fills lengths and task metadata after receiving the selected
+    indices. Pool construction and scoring remain outside operator dispatch.
     """
 
-    def __init__(self, kv_cache_spec, vllm_config, device, indexer, kernel_block_size=128):
+    def __init__(self, kv_cache_spec, vllm_config, device, kernel_block_size=128):
         block_size = kv_cache_spec.block_size
         if block_size <= 0 or block_size % kernel_block_size:
             raise ValueError("Sparse MLA block size must be a positive multiple of the SFA kernel block size.")
@@ -188,13 +195,7 @@ class SparseMLAMetadataState:
             dtype=torch.int32,
             device=device,
         )
-        self.indexer = indexer
         if self.use_smla:
-            if indexer is None:
-                raise ValueError("A5 NoPE sparse MLA requires an indexer to supply visible top-k lengths.")
-            config = vllm_config.model_config.hf_text_config
-            self.num_heads = config.num_attention_heads // vllm_config.parallel_config.tensor_parallel_size
-            self.head_dim = config.kv_lora_rank
             self.metadata_buffer = torch.empty(SMLA_METADATA_SIZE, dtype=torch.int32, device=device)
             self.length_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
@@ -218,14 +219,8 @@ class SparseMLAMetadataState:
             positions = metadata.positions
             if positions.numel() > self.length_buffer.shape[0]:
                 raise ValueError("Sparse MLA token count exceeds its persistent top-k buffer.")
-            lengths = self.length_buffer[: positions.numel()]
-            counts = self.indexer.get_topk_lengths(positions)
-            valid = torch.arange(positions.numel(), device=positions.device) < metadata.query_start_loc[-1]
-            lengths[:, 0].copy_(counts.masked_fill(~valid, 0))
-            metadata.smla_topk_length = lengths
-            build_smla_metadata(
-                metadata, self.metadata_buffer, self.num_heads, self.head_dim, self.indexer.topk_output_width
-            )
+            metadata.smla_topk_length = self.length_buffer[: positions.numel()]
+            metadata.smla_metadata = self.metadata_buffer
         return metadata
 
 
@@ -404,10 +399,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         layer = vllm_config.compilation_config.static_forward_context[layer_names[0]]
         self.nope = layer.qk_rope_head_dim == 0
         self.nope_states: dict[int | None, SparseMLAMetadataState] = {}
-        self.nope_indexer = None
-        if self.nope:
-            self.nope_indexer = layer.impl.indexer
-
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         if self.speculative_config:
@@ -605,7 +596,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             metadata.num_decode_tokens = int(query_lens[~is_prefilling].sum())
             if draft_index not in self.nope_states:
                 self.nope_states[draft_index] = SparseMLAMetadataState(
-                    self.kv_cache_spec, self.vllm_config, self.device, self.nope_indexer, self.kernel_block_size
+                    self.kv_cache_spec, self.vllm_config, self.device, self.kernel_block_size
                 )
             self.nope_states[draft_index].prepare(metadata)
         return metadata
