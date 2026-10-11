@@ -181,6 +181,7 @@ def fused_recurrent_kda(
         "HAS_RESIDUAL": lambda args: args["residual"] is not None,
         "HAS_WEIGHT": lambda args: args["w"] is not None,
         "HAS_BIAS": lambda args: args["b"] is not None,
+        "HAS_VALID_TOKENS": lambda args: args["num_valid_tokens"] is not None,
     }
 )
 @triton.jit
@@ -195,6 +196,8 @@ def layer_norm_gated_fwd_kernel(
     mean,  # pointer to the mean
     rstd,  # pointer to the 1/std
     eps,  # epsilon to avoid division by zero
+    num_valid_tokens,
+    HEADS_PER_TOKEN: tl.constexpr,
     T,  # number of rows in x
     D: tl.constexpr,  # number of columns in x
     BT: tl.constexpr,
@@ -205,6 +208,7 @@ def layer_norm_gated_fwd_kernel(
     HAS_RESIDUAL: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    HAS_VALID_TOKENS: tl.constexpr,
 ):
     i_t = tl.program_id(0)
 
@@ -250,6 +254,11 @@ def layer_norm_gated_fwd_kernel(
     elif ACTIVATION == "sigmoid":
         b_y = b_y * tl.sigmoid(b_g)
 
+    if HAS_VALID_TOKENS:
+        live_rows = tl.load(num_valid_tokens) * HEADS_PER_TOKEN
+        rows = i_t * BT + tl.arange(0, BT)
+        b_y = tl.where(rows[:, None] < live_rows, b_y, 0.0)
+
     # Write output
     p_y = tl.make_block_ptr(y, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
     tl.store(p_y, b_y.to(p_y.dtype.element_ty), boundary_check=(0, 1))
@@ -261,6 +270,7 @@ def layer_norm_gated_fwd_kernel(
         "HAS_RESIDUAL": lambda args: args["residual"] is not None,
         "HAS_WEIGHT": lambda args: args["w"] is not None,
         "HAS_BIAS": lambda args: args["b"] is not None,
+        "HAS_VALID_TOKENS": lambda args: args["num_valid_tokens"] is not None,
     }
 )
 @triton.jit
@@ -275,6 +285,8 @@ def layer_norm_gated_fwd_kernel1(
     mean,  # pointer to the mean
     rstd,  # pointer to the 1/std
     eps,  # epsilon to avoid division by zero
+    num_valid_tokens,
+    HEADS_PER_TOKEN: tl.constexpr,
     D: tl.constexpr,  # number of columns in x
     BD: tl.constexpr,
     ACTIVATION: tl.constexpr,
@@ -283,6 +295,7 @@ def layer_norm_gated_fwd_kernel1(
     HAS_RESIDUAL: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    HAS_VALID_TOKENS: tl.constexpr,
 ):
     i_t = tl.program_id(0)
     x += i_t * D
@@ -327,6 +340,9 @@ def layer_norm_gated_fwd_kernel1(
     elif ACTIVATION == "sigmoid":
         b_y = b_y * tl.sigmoid(b_g)
 
+    if HAS_VALID_TOKENS:
+        b_y = tl.where(i_t < tl.load(num_valid_tokens) * HEADS_PER_TOKEN, b_y, 0.0)
+
     # Write output
     tl.store(y + o_d, b_y, mask=m_d)
 
@@ -342,6 +358,9 @@ def layer_norm_gated_fwd(
     out_dtype: torch.dtype = None,
     residual_dtype: torch.dtype = None,
     is_rms_norm: bool = False,
+    out: torch.Tensor | None = None,
+    num_valid_tokens: torch.Tensor | None = None,
+    heads_per_token: int = 1,
 ):
     if residual is not None:
         residual_dtype = residual.dtype
@@ -353,8 +372,10 @@ def layer_norm_gated_fwd(
     if bias is not None:
         assert bias.shape == (D,)
     # allocate output
-    y = x if out_dtype is None else torch.empty_like(x, dtype=out_dtype)
-    if residual is not None or (residual_dtype is not None and residual_dtype != x.dtype):
+    y = out if out is not None else (x if out_dtype is None else torch.empty_like(x, dtype=out_dtype))
+    if out is not None:
+        assert out.shape == x.shape and out.dtype == x.dtype and out.is_contiguous()
+    if residual is not None or (residual_dtype is not None and (residual_dtype != x.dtype or out is not None)):
         residual_out = torch.empty(T, D, device=x.device, dtype=residual_dtype)
     else:
         residual_out = None
@@ -380,6 +401,8 @@ def layer_norm_gated_fwd(
             mean=mean,
             rstd=rstd,
             eps=eps,
+            num_valid_tokens=num_valid_tokens,
+            HEADS_PER_TOKEN=heads_per_token,
             T=T,
             D=D,
             BD=BD,
@@ -400,6 +423,8 @@ def layer_norm_gated_fwd(
             mean=mean,
             rstd=rstd,
             eps=eps,
+            num_valid_tokens=num_valid_tokens,
+            HEADS_PER_TOKEN=heads_per_token,
             D=D,
             BD=BD,
             ACTIVATION=activation,
@@ -420,8 +445,11 @@ def rms_norm_gated(
     prenorm: bool = False,
     residual_in_fp32: bool = False,
     eps: float = 1e-6,
+    out: torch.Tensor | None = None,
+    num_valid_tokens: torch.Tensor | None = None,
 ):
     x_shape_og = x.shape
+    heads_per_token = g.shape[-2] if g.ndim > 2 else 1
     # reshape input data into 2D tensor
     x = x.contiguous().reshape(-1, x.shape[-1])
     g = g.contiguous().reshape(-1, g.shape[-1])
@@ -429,6 +457,8 @@ def rms_norm_gated(
         assert residual.shape == x_shape_og
         residual = residual.contiguous().reshape(-1, residual.shape[-1])
     residual_dtype = residual.dtype if residual is not None else (torch.float if residual_in_fp32 else None)
+    if prenorm and out is not None and residual_dtype is None:
+        residual_dtype = x.dtype
     y, _, _, residual_out = layer_norm_gated_fwd(
         x=x,
         g=g,
@@ -437,9 +467,12 @@ def rms_norm_gated(
         activation=activation,
         eps=eps,
         residual=residual,
-        out_dtype=x.dtype,  # Preserve the input, as in the v0.26 K3 fused norm gate.
+        out_dtype=x.dtype,  # Preserve the input unless the caller supplies out.
         residual_dtype=residual_dtype,
         is_rms_norm=True,
+        out=out.view_as(x) if out is not None else None,
+        num_valid_tokens=num_valid_tokens,
+        heads_per_token=heads_per_token,
     )
     y = y.reshape(x_shape_og)
     return y if not prenorm else (y, residual_out.reshape(x_shape_og))

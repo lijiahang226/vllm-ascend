@@ -524,15 +524,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             else:
                 core_attn_out[0, : output.shape[1]].copy_(output[0])
 
-        # Match K3: normalize the merged live region, then define the padding.
-        normalized = self.o_norm(core_attn_out[:, :num_actual_tokens], g2[:num_actual_tokens])
-        core_attn_out[:, :num_actual_tokens].copy_(normalized)
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            # Python slice bounds stay fixed during replay; device lengths do not.
+            # Replay lengths are device values; clear padding in the norm's final store.
             live_tokens = spec_query_start_loc[-1] if use_spec else non_spec_query_start_loc[-1]
             if use_spec and q_ns is not None:
                 live_tokens = live_tokens + non_spec_query_start_loc[-1]
-            valid = torch.arange(core_attn_out.shape[1], device=core_attn_out.device) < live_tokens
-            core_attn_out.masked_fill_(~valid[None, :, None, None], 0)
+            self.o_norm(core_attn_out, g2, out=core_attn_out, num_valid_tokens=live_tokens)
         else:
+            live_output = core_attn_out[:, :num_actual_tokens]
+            self.o_norm(live_output, g2[:num_actual_tokens], out=live_output)
             core_attn_out[:, num_actual_tokens:].zero_()

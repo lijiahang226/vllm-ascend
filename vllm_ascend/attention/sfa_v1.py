@@ -155,9 +155,11 @@ def sparse_mla(query, cache, indices, metadata, scale):
             attention_mode=2,
             return_softmax_lse=False,
         )
+        # A2/A3 SparseFlashAttention initializes the unwritten TND tail in-kernel.
+        if get_current_hardware_profile().device_adaptor_family != DeviceAdaptorFamily.FP8_OPTIMIZED:
+            return result[0]
     output = result[0]
-    # Both operators can leave graph-capacity rows unwritten. Clear padding
-    # in place before projections without allocating another output tensor.
+    # Other kernels still need padding cleared before projections.
     valid = torch.arange(query.shape[0], device=query.device) < metadata.query_start_loc[-1]
     return output.masked_fill_(~valid[:, None, None], 0)
 

@@ -9,6 +9,14 @@ import torch
 import vllm_ascend.models.glm5next.kda as model_kda
 
 
+def _norm(x, g, *, out, num_valid_tokens=None):
+    result = x * torch.sigmoid(g)
+    if num_valid_tokens is not None:
+        result[:, num_valid_tokens:] = 0
+    out.copy_(result)
+    return out
+
+
 @pytest.mark.parametrize("speculative", [False, True])
 @pytest.mark.parametrize("dim_first", [False, True])
 def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch, speculative, dim_first):
@@ -26,7 +34,7 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
     # dtype and [width, q|k|v] ordering in the cached packed weight.
     for index, name in enumerate(("q_conv1d", "k_conv1d", "v_conv1d"), start=1):
         setattr(layer, name, SimpleNamespace(bias=None, weight=torch.full((128, 1, 4), float(index))))
-    layer.o_norm = lambda x, g: x * torch.sigmoid(g)
+    layer.o_norm = _norm
     layer.A_log = torch.zeros(1)
     layer.dt_bias = torch.zeros(128)
     tokens = 5 if speculative else 4
@@ -214,7 +222,7 @@ def test_full_graph_padding_uses_device_length_after_norm(monkeypatch, mode):
         _merged_conv_weight=torch.zeros(4, 384),
         A_log=torch.zeros(1),
         dt_bias=torch.zeros(128),
-        o_norm=lambda x, g: x * torch.sigmoid(g),
+        o_norm=_norm,
     )
     qkv = torch.ones(capacity, 384)
     qkv[live_tokens:] = torch.nan

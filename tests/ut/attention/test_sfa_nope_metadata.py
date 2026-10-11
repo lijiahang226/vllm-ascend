@@ -209,8 +209,8 @@ def test_rope_sfa_preserves_cache_composition_and_device_dispatch(sfa_c8, li_c8)
     dispatch.assert_called_once_with(impl, q, rope, composed, indices, metadata, query_lens, seq_lens, block_table=None)
 
 
-@pytest.mark.parametrize("a5", [False, True])
-def test_nope_operator_padding_contract(monkeypatch, a5):
+@pytest.mark.parametrize(("a5", "native_a5"), [(False, False), (True, False), (False, True)])
+def test_nope_operator_padding_contract(monkeypatch, a5, native_a5):
     query = torch.ones(3, 2, 128)
     cache = torch.zeros(2, 128, 1, 128)
     metadata = SimpleNamespace(
@@ -224,8 +224,16 @@ def test_nope_operator_padding_contract(monkeypatch, a5):
 
     result = query.clone()
     result[0, 0, 0] = float("nan")
-    result[2] = float("nan")
+    # SparseFlashAttention defines padding in its kernel; SparseFlashMla does not.
+    result[2] = float("nan") if a5 or native_a5 else 0
     expected = result[:2].clone()
+    monkeypatch.setattr(
+        sparse_mla,
+        "get_current_hardware_profile",
+        lambda: SimpleNamespace(
+            device_adaptor_family=sparse_mla.DeviceAdaptorFamily.FP8_OPTIMIZED if native_a5 else None
+        ),
+    )
 
     def op(*args, **kwargs):
         return (result,)
