@@ -1,5 +1,6 @@
 import importlib
 import math
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, cast
 
 import vllm.envs as envs
@@ -38,6 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     block_hash_to_str,
     get_block_hashes,
     get_cache_family_granularity,
+    get_kv_pool_lookup_tp_size,
     infer_cache_family_ratio,
     infer_group_cache_families,
     infer_tp_mismatch_info,
@@ -66,6 +68,7 @@ class KVPoolScheduler:
         if self.compress_ratios is None:
             self.compress_ratios = getattr(hf_config, "compress_ratios", None)
         self.use_compress = self.compress_ratios is not None
+        self.use_sparse = hasattr(vllm_config.model_config.hf_text_config, "index_topk")
         self.use_hybrid = self._uses_hybrid_kv_cache(vllm_config, kv_cache_config)
         self.kv_cache_group_ids = (
             list(range(len(kv_cache_config.kv_cache_groups)))
@@ -156,12 +159,23 @@ class KVPoolScheduler:
             use_hybrid=self.use_hybrid,
         )
         self.tp_mismatch = tp_mismatch_info.enabled
+        self.effective_tp_size = tp_mismatch_info.effective_tp_size
 
         self.page_size_bytes = page_size_bytes
         logger.info("KV pool page_size_bytes: %d", page_size_bytes)
         backend_name = vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake")
         self.backend_name = backend_name.lower()
         self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
+        self.use_scheduler_client_for_lookup = (
+            not self.use_layerwise
+            and self.backend_name == "memcache"
+            and vllm_config.kv_transfer_config.kv_connector_extra_config.get("use_scheduler_client_for_lookup", False)
+        )
+        self.lookup_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("lookup_async", False)
+        if self.lookup_async and not self.use_scheduler_client_for_lookup:
+            raise ValueError("lookup_async requires use_scheduler_client_for_lookup=true.")
+        if self.use_scheduler_client_for_lookup and self.use_hybrid:
+            raise ValueError("Scheduler-client lookup does not support hybrid KV cache layouts yet.")
         backend = backend_map.get(self.backend_name)
         if backend is None:
             raise ValueError(f"Unsupported KV pool backend: {backend_name}")
@@ -196,6 +210,10 @@ class KVPoolScheduler:
         self.keys_per_block_hash = keys_per_block_hash
 
         self.client: LookupKeyClient | None = None
+        self._lookup_executor = (
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="AscendStoreLookup") if self.lookup_async else None
+        )
+        self._lookup_futures: dict[str, Future[int]] = {}
 
     def _get_or_create_request_tracker(self, req_id: str) -> RequestTracker:
         tracker = self._request_trackers.get(req_id)
@@ -226,7 +244,13 @@ class KVPoolScheduler:
         include_layers: bool = False,
         kv_cache_group_id: int = 0,
     ) -> list[list[str]]:
-        head_or_tp_ranks = self.tp_size // self.put_step
+        head_or_tp_ranks = get_kv_pool_lookup_tp_size(
+            self.tp_size,
+            self.num_kv_head,
+            self.use_mla,
+            self.use_sparse,
+            effective_tp_size=self.effective_tp_size if self.tp_mismatch else None,
+        )
         cache_family = self._get_group_family(self.kv_cache_group_families, kv_cache_group_id)
         keys_by_block = []
         for block_hash in block_hashes:
@@ -300,6 +324,29 @@ class KVPoolScheduler:
 
         num_hit_blocks = query_start_block + num_queried_hit_blocks
         return num_hit_blocks * self._block_size
+
+    def _get_or_submit_store_lookup(self, request: "Request", token_len: int) -> int | None:
+        """Return a completed scheduler-client lookup or submit it once."""
+        assert self._lookup_executor is not None
+        req_id = request.request_id
+        future = self._lookup_futures.get(req_id)
+        if future is None:
+            future = self._lookup_executor.submit(self._get_store_lookup_hit_tokens, request, token_len, 0)
+            self._lookup_futures[req_id] = future
+        if not future.done():
+            return None
+        try:
+            return future.result()
+        except Exception:
+            logger.exception("Async KV pool lookup failed for request %s", req_id)
+            return 0
+        finally:
+            self._lookup_futures.pop(req_id, None)
+
+    def _discard_store_lookup(self, req_id: str) -> None:
+        future = self._lookup_futures.pop(req_id, None)
+        if future is not None:
+            future.cancel()
 
     def _make_layerwise_gva_keys_for_hit_check(self, group_id: int, block_hash_hex: str) -> list[str]:
         """Generate all-rank GVA keys for scheduler-side hit check.
@@ -385,7 +432,12 @@ class KVPoolScheduler:
 
     def _infer_group_families(self) -> list[str]:
         kv_cache_groups = self.kv_cache_config.kv_cache_groups if self.kv_cache_config is not None else None
-        return infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
+        return infer_group_cache_families(
+            kv_cache_groups,
+            self.compress_ratios,
+            self.hf_config,
+            use_sparse=self.use_sparse and not self.use_compress and not self.use_hybrid,
+        )
 
     def _infer_group_block_sizes(
         self,
@@ -495,7 +547,7 @@ class KVPoolScheduler:
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> tuple[int, bool]:
+    ) -> tuple[int | None, bool]:
         """
         Check for external KV cache hit.
 
@@ -530,14 +582,24 @@ class KVPoolScheduler:
 
             if token_len < self.cache_transfer_granularity:
                 return 0, False
+            if not self.use_layerwise and num_computed_tokens >= token_len:
+                return 0, False
 
             if self.use_layerwise:
                 num_external_hit_tokens = self._get_store_lookup_hit_tokens(
                     request, token_len, num_computed_tokens, include_layers=True
                 )
+            elif self.use_scheduler_client_for_lookup:
+                # Match the existing worker lookup semantics: query the full
+                # remote prefix instead of assuming the local HBM prefix also
+                # exists in KV Pool.
+                if self.lookup_async:
+                    num_external_hit_tokens = self._get_or_submit_store_lookup(request, token_len)
+                    if num_external_hit_tokens is None:
+                        return None, False
+                else:
+                    num_external_hit_tokens = self._get_store_lookup_hit_tokens(request, token_len, 0)
             else:
-                if num_computed_tokens >= token_len:
-                    return 0, False
                 if self.client is None:
                     self.client = LookupKeyClient(self.vllm_config)
                 num_external_hit_tokens = self.client.lookup(
@@ -731,9 +793,7 @@ class KVPoolScheduler:
             token_len=num_tokens_to_compute,
             allocated_block_ids_by_group=block_ids_by_group,
             num_saved_tokens=0,
-            token_ids=(
-                request.prompt_token_ids[:num_tokens_to_compute].copy() if self.enable_kv_events else None
-            ),
+            token_ids=(request.prompt_token_ids[:num_tokens_to_compute].copy() if self.enable_kv_events else None),
             num_prompt_tokens=len(request.prompt_token_ids),
             block_keys=(previous_tracker.block_keys.copy() if previous_tracker else []),
             block_gvas=(previous_tracker.block_gvas.copy() if previous_tracker else []),
@@ -784,9 +844,7 @@ class KVPoolScheduler:
             token_len=num_tokens_to_compute,
             allocated_block_ids_by_group=new_block_ids_by_group,
             num_saved_tokens=0,
-            token_ids=(
-                request_real.prompt_token_ids[:num_tokens_to_compute].copy() if self.enable_kv_events else None
-            ),
+            token_ids=(request_real.prompt_token_ids[:num_tokens_to_compute].copy() if self.enable_kv_events else None),
             num_prompt_tokens=len(request_real.prompt_token_ids),
             block_keys=(previous_tracker.block_keys.copy() if previous_tracker else []),
             block_gvas=(previous_tracker.block_gvas.copy() if previous_tracker else []),
@@ -927,6 +985,7 @@ class KVPoolScheduler:
         force_skip_save = self.kv_role == "kv_consumer" and not self.consumer_is_to_put
 
         for finished_req_id in scheduler_output.finished_req_ids:
+            self._discard_store_lookup(finished_req_id)
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
             self._unfinished_request_ids.discard(finished_req_id)
@@ -1112,6 +1171,14 @@ class KVPoolScheduler:
     def update_finished_recving(self, finished_recving: set[str] | None) -> None:
         if finished_recving:
             self._loading_req_ids.difference_update(finished_recving)
+
+    def shutdown(self) -> None:
+        for future in self._lookup_futures.values():
+            future.cancel()
+        self._lookup_futures.clear()
+        if self._lookup_executor is not None:
+            self._lookup_executor.shutdown(wait=False, cancel_futures=True)
+            self._lookup_executor = None
 
 
 class LookupKeyClient:
