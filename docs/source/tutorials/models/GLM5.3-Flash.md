@@ -20,7 +20,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 - `GLM-5.3-Flash-w8a8`: requires 1 Atlas 800 A3 (128GB × 8) node.[Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
 - `GLM-5.3-Flash-w8a8`: requires 2 Atlas 800 A2 (64GB × 16) nodes.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
 
-- You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
+- You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly. For Ascend950DT, refer to the [MXFP8 conversion recipe](https://github.com/Ascend/msmodelslim/blob/master/lab_practice/glm_5_next/glm_5_next_convert_mxfp8.yaml).
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
@@ -149,16 +149,17 @@ It is recommended to download the model weight to the shared directory of multip
 
 === "Ascend950DT series"
 
-    - Quantized model `GLM-5.3-Flash-w8a8-mxfp8` can be deployed on 1 Ascend950DT (96GB × 8) .
+    - Quantized model `GLM-5.3-Flash-w8a8-mxfp8` can be deployed on 1 Ascend950DT (96GB × 8).
 
     Run the following script to execute online inference.
 
     ```shell
 
+    export VLLM_USE_V2_MODEL_RUNNER=0
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
 
-    vllm serve Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8 \
+    vllm serve /path/to/GLM-5.3-Flash-w8a8-mxfp8 \
       --host 0.0.0.0 \
       --port 8011 \
       --data-parallel-size 1 \
@@ -220,11 +221,16 @@ Only the key parameters specific to this model/scenario are described below. `ma
 **Model-specific parameters:**
 
 - `--data-parallel-size 1`: Runs a single DP rank. `--tensor-parallel-size` is 8 on Ascend950DT and 16 on Atlas 800 A3. This layout is recommended to balance memory capacity and compute efficiency for the w8a8 weights.
-- `--enable-expert-parallel`: Must be enabled for the MoE architecture of GLM-5.3-Flash.
-- `--quantization ascend`: Enables Ascend quantization for the w8a8 quantized weights.
+- `--enable-expert-parallel`: Enables expert parallelism for the MoE layers.
+- `--quantization ascend`: Enables Ascend quantization for W8A8 weights on A2/A3 and MXFP8 weights on Ascend950DT.
+- `--kv-cache-dtype`: Enables optional SFA C8. Use `int8` on A3, or `fp8`/`int8` on Ascend950DT. It only quantizes the main SFA KV cache; KPool and compressor state remain unchanged.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
 - `--limit-mm-per-prompt '{"image": 1, "video": 0}'`: For text-only deployment, --limit-mm-per-prompt can be omitted. For multimodal deployment, configure this parameter according to the actual request shape. For example, use --limit-mm-per-prompt '{"image":2,"video":0}' for two-image requests, and use --limit-mm-per-prompt '{"image":0,"video":1}' for one-video requests.
-- `--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. `num_speculative_tokens` (3-5) controls how many tokens are speculated per step; `enforce_eager: true` is required because GLM-5.3-Flash does not support graph-mode speculative decoding.
+- `--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'`: Enables three-token MTP speculative decoding. `enforce_eager: true` keeps the draft model in eager mode.
+
+!!! note
+
+    SFA C8 requires the latest main build with matching custom operators. A5 C8 has operator-level validation; full-model validation is pending.
 
 ### 5.2 Multi-Node Deployment
 
@@ -353,7 +359,7 @@ curl http://<node0_ip>:<port>/v1/completions \
     -d '{
         "model": "glm",
         "prompt": "The future of AI is",
-        "max_completion_tokens": 50,
+        "max_tokens": 50
     }'
 ```
 

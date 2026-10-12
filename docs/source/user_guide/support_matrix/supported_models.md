@@ -23,6 +23,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     |DeepSeek V4-Pro|✅|Native mixed MXFP8/MXFP4 weights||Ascend 950 Products|✅|✅|✅||✅|✅||✅|✅|✅|✅||✅|1M||[DeepSeek V4-Pro](../../tutorials/models/DeepSeek-V4-Pro.md)|
     |DeepSeek-V3.1|✅|  |✅| Ascend 950 Products |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|240k|| [DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md) |
     |GLM-5.1|✅| |✅| Ascend 950 Products |✅|✅|✅||✅|✅|✅||✅|✅|✅||✅|200k||[GLM-5.1](../../tutorials/models/GLM5.md) |
+    |GLM-5.3-Flash|🔵|MXFP8; FULL_DECODE_ONLY|🟡|Ascend950DT|✅|✅|🟡|🟡|✅|🟡|✅|🟡|✅|✅|🟡|🟡|✅|132096|🟡|[GLM-5.3-Flash](../../tutorials/models/GLM5.3-Flash.md)|
 
 === "A2/A3"
 
@@ -42,7 +43,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | GLM-5/5.1           |   🔵    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5](../../tutorials/models/GLM5.md) |
     | GLM-5.2             |   🔵    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5.2](../../tutorials/models/GLM5.2.md) |
     | GLM-5.3             |   🔵    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | 🔵 | ✅ | ✅ | 🔵 | ✅ | ✅ | 200k | [GLM-5.3](../../tutorials/models/GLM5.3.md) |
-    | GLM-5.3-Flash             |   🔵    |      |  ✅ |  A2/A3/Ascend950   | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5.3-Flash](../../tutorials/models/GLM5.3-Flash.md) |
+    | GLM-5.3-Flash             |   🔵    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5.3-Flash](../../tutorials/models/GLM5.3-Flash.md) |
     | Gemma4              |   🔵    |      |  ✅ |   A2/A3/Ascend950  |     | ✅ | ✅ |  |  | ✅ | ✅ |  |  | ✅ |  | ✅ | ✅ |  | [Gemma4](../../tutorials/models/Gemma4.md) |
     | Kimi-K2-Thinking    |   🔵    |      |      |       A2/A3       |      |  |  |  |  |  |  |  |  |  |  |  |  |  | [Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md) |
     | DeepSeekOCR2        |   ✅    |      |  ✅ |       A2/A3        |     | ✅ |  |  |  | ✅ |  |  |  |  |  |  |  |  | [DeepSeekOCR2](../../tutorials/models/DeepSeekOCR2.md) |
