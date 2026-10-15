@@ -619,6 +619,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             self._gather_retained_hidden = adapters.gather_retained_hidden
             self._pack_keypool_indices = fused.pack_keypool_indices
             self._prepare_keypool_state = adapters.prepare_keypool_state
+            self._prepare_pool_key_indexer_inputs = fused.prepare_pool_key_indexer_inputs
             self._write_keypool_caches = fused.write_keypool_caches
             self._key_pool = torch.ops.cann_ops_transformer.key_pool
             self._pool_key_indexer = torch.ops.cann_ops_transformer.pool_key_indexer
@@ -741,14 +742,17 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             return torch.full((num_tokens, 1, output_width), -1, dtype=torch.int32, device=hidden_states.device)
         assert q_values is not None and weights is not None
         query = q_values.to(indexer_cache.dtype)
+        inputs = self._prepare_pool_key_indexer_inputs(
+            query, weights.to(torch.bfloat16), query_metadata, indexer_metadata.block_table
+        )
         indices, _ = self._pool_key_indexer(
-            query,
+            inputs.query,
             indexer_cache,
-            weights.to(torch.bfloat16),
-            query_metadata.pool_tail,
-            actual_seq_q=query_metadata.cum_query_lens,
-            actual_seq_k=query_metadata.seq_lens,
-            block_table=indexer_metadata.block_table,
+            inputs.weights,
+            inputs.pool_tail,
+            actual_seq_q=inputs.cum_query_lens,
+            actual_seq_k=inputs.seq_lens,
+            block_table=inputs.block_table,
             layout_q="TND",
             layout_k="PA_BBND",
             topk=self.topk_tokens,
@@ -756,5 +760,5 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             mask_mode=3,
         )
         return self._pack_keypool_indices(
-            indices, query_metadata, self.topk_tokens, self.index_kpool, self.topk_indices_buffer
+            indices[1:], query_metadata, self.topk_tokens, self.index_kpool, self.topk_indices_buffer
         )

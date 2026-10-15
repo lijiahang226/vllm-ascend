@@ -237,3 +237,63 @@ def test_business_shape_index_packing_in_place():
     expected[:3, 2048] = torch.tensor([65536, -1, 65540], dtype=torch.int32, device="npu")
     torch.testing.assert_close(indices, expected, rtol=0, atol=0)
     assert result.data_ptr() == indices.data_ptr()
+
+
+@torch.inference_mode()
+def test_cann_selection_replays_empty_short_and_live_requests():
+    from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+
+    if not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
+        pytest.skip("Requires A5 CANN PoolKeyIndexer")
+    pytest.importorskip("cann_ops_transformer")
+    tokens, heads, dim, topk = 4, 32, 128, 2048
+    query = torch.ones((tokens, heads, dim), dtype=torch.bfloat16, device="npu")
+    weights = torch.ones((tokens, heads), dtype=torch.bfloat16, device="npu")
+    cache = torch.ones((2, 32, 1, dim), dtype=torch.bfloat16, device="npu")
+    table = torch.tensor([[0], [1]], dtype=torch.int32, device="npu")
+    metadata = SimpleNamespace(
+        cum_query_lens=torch.zeros(2, dtype=torch.int64, device="npu"),
+        seq_lens=torch.zeros(2, dtype=torch.int64, device="npu"),
+        pool_tail=torch.zeros(2, dtype=torch.int64, device="npu"),
+        positions=torch.zeros(tokens, dtype=torch.int64, device="npu"),
+    )
+
+    def run():
+        inputs = adapters.prepare_pool_key_indexer_inputs(query, weights, metadata, table)
+        indices, _ = torch.ops.cann_ops_transformer.pool_key_indexer(
+            inputs.query,
+            cache,
+            inputs.weights,
+            inputs.pool_tail,
+            actual_seq_q=inputs.cum_query_lens,
+            actual_seq_k=inputs.seq_lens,
+            block_table=inputs.block_table,
+            layout_q="TND",
+            layout_k="PA_BBND",
+            topk=topk,
+            pool_size=4,
+            mask_mode=3,
+        )
+        return adapters.pack_keypool_indices(indices[1:], metadata, topk, 4)
+
+    for _ in range(3):
+        run()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        result = run()
+    cases = (
+        ([0, 0], [0, 0], [0, 0], [0, 0, 0, 0]),
+        ([2, 4], [0, 0], [2, 2], [0, 1, 0, 1]),
+        ([1, 4], [2, 1], [0, 0], [7, 1, 2, 3]),
+        ([0, 0], [0, 0], [0, 0], [0, 0, 0, 0]),
+    )
+    for ends, lengths, tails, positions in cases:
+        for field, values in zip(
+            ("cum_query_lens", "seq_lens", "pool_tail", "positions"), (ends, lengths, tails, positions)
+        ):
+            getattr(metadata, field).copy_(torch.tensor(values, device="npu"))
+        graph.replay()
+        actual = result.cpu()
+        for row, position in enumerate(positions):
+            valid = actual[row, 0][actual[row, 0] >= 0].sort().values.tolist()
+            assert valid == (list(range(position + 1)) if row < ends[-1] else [])
