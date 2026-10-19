@@ -1,0 +1,134 @@
+{
+  "description": "Actual saved native-normalized inputs of the 581-token KDA tail case, with previously recorded baseline/padded outputs",
+  "npz_sha256": "497d1b857b6fa814eb1bbadb77e852de60d02ec53c292c92b768f61afd54a6b7",
+  "source_archive_sha256": "67bad79f88d6a00a5ac483f417bd5730e77e073ae23e2f8502d3d3d2e62c1293",
+  "q_k_already_normalized": true,
+  "beta_already_sigmoid": true,
+  "npz_encoding": "BF16 tensors stored losslessly as upper 16-bit uint16; all other operator inputs stored as exact FP32",
+  "operator_inputs": {
+    "q": {
+      "shape": [
+        1,
+        581,
+        8,
+        128
+      ],
+      "dtype": "bfloat16"
+    },
+    "k": {
+      "shape": [
+        1,
+        581,
+        8,
+        128
+      ],
+      "dtype": "bfloat16"
+    },
+    "v": {
+      "shape": [
+        1,
+        581,
+        8,
+        128
+      ],
+      "dtype": "bfloat16"
+    },
+    "raw_gate": {
+      "shape": [
+        1,
+        581,
+        8,
+        128
+      ],
+      "dtype": "bfloat16"
+    },
+    "beta": {
+      "shape": [
+        1,
+        581,
+        8
+      ],
+      "dtype": "float32"
+    },
+    "initial_state": {
+      "shape": [
+        1,
+        8,
+        128,
+        128
+      ],
+      "dtype": "float32",
+      "layout": "VK",
+      "nonzero": true
+    },
+    "A_log": {
+      "shape": [
+        8
+      ],
+      "dtype": "float32"
+    },
+    "dt_bias": {
+      "shape": [
+        1024
+      ],
+      "dtype": "float32"
+    }
+  },
+  "kwargs": {
+    "layout": "BSND",
+    "scale": 0.08838834764831845,
+    "chunk_size": 64,
+    "cu_seqlens": [
+      0,
+      581
+    ],
+    "chunk_indices": [
+      0,
+      0,
+      0,
+      1,
+      0,
+      2,
+      0,
+      3,
+      0,
+      4,
+      0,
+      5,
+      0,
+      6,
+      0,
+      7,
+      0,
+      8,
+      0,
+      9
+    ],
+    "output_final_state": true,
+    "safe_gate": true,
+    "lower_bound": -5.0,
+    "use_gate_in_kernel": true,
+    "disable_recompute": false,
+    "return_intermediate_states": false,
+    "state_v_first": true
+  },
+  "padded_control": {
+    "input_length": 640,
+    "q_k_v": 0,
+    "processed_beta": 0,
+    "raw_gate": "-inf",
+    "cu_seqlens": [
+      0,
+      640
+    ],
+    "return_real_tokens": 581
+  },
+  "proven_execution": {
+    "image": "quay.io/ascend/vllm-ascend:v0.30.0rc2-a5-openeuler",
+    "FLA": "26.9.1+deva4a7958",
+    "CANN": "9.2.0",
+    "tested_release_base": "7672a5b509467288a12d7a2cee3451dd939d8b9c",
+    "fix": "538dbee1bfdb1f678e350063b53025897d1d4cd7"
+  },
+  "failure_scope": "The saved input values reproduce the known case; identical shapes with random values are not proven to yield identical failures. This newly packaged direct replay script was CPU-audited, not newly run on NPU."
+}

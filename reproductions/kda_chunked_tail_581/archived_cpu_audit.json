@@ -1,0 +1,16 @@
+{
+  "mode": "saved_outputs_CPU_audit",
+  "archived_output_audit": {
+    "baseline": {
+      "output_relative_RMS_percent": 4.113025209667554,
+      "tail_5_output_relative_RMS_percent": 57.31697008729473,
+      "final_state_relative_RMS_percent": 0.21645770744025955
+    },
+    "padded": {
+      "output_relative_RMS_percent": 0.3183662713190268,
+      "tail_5_output_relative_RMS_percent": 0.26191243795447605,
+      "final_state_relative_RMS_percent": 0.2165152142929613
+    }
+  },
+  "new_native_results": []
+}
