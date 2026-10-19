@@ -1,0 +1,30 @@
+{
+  "README.md": {
+    "sha256": "6de98df8b379f5f0506de6e2f0eecec479241d70b568e4c0ce879307c994b883",
+    "bytes": 5478
+  },
+  "reproduce_kda581.py": {
+    "sha256": "a22e96199caeaebd4d7b93714fae6aa33eaedb870f4f652afc7ea0376fc15be9",
+    "bytes": 7580
+  },
+  "kda581_case.npz": {
+    "sha256": "497d1b857b6fa814eb1bbadb77e852de60d02ec53c292c92b768f61afd54a6b7",
+    "bytes": 7103165
+  },
+  "case_manifest.json": {
+    "sha256": "2977ebd2743eacab07f0bb9971bb1cf2eea62ddbb65813d159f4b7d2ca290582",
+    "bytes": 2874
+  },
+  "archived_cpu_audit.json": {
+    "sha256": "c92944d89e4e2db08a6bd4c1372624a2dee75740d46d57c84e4ff69c5b45d37d",
+    "bytes": 512
+  },
+  "FP64_reference.npz": {
+    "sha256": "0e802a2152f6fe416d8e76d413622d6d0aeeaceabfc2dc61ad07b3269303541c",
+    "bytes": 5636345
+  },
+  "stock_fla_origin.json": {
+    "sha256": "a327180339cd00fc1976957cda5d54c7730e3de2c34a67cf7b13b5f5751a8d12",
+    "bytes": 1169
+  }
+}

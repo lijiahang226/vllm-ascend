@@ -4,6 +4,12 @@
 不需要模型权重，不需要启动 vLLM 服务，也不需要应用 KDA 修复 PR。
 随机生成同样 shape 的输入不保证复现相同误差。
 
+## 完整配套下载
+
+[下载独立复现 ZIP](kda581_reproduction.zip)。解压后直接按下列命令运行。
+包内另附 `FP64_reference.npz`（FP64 输出与最终状态），可供算子团队直接数值比对；
+`checksums.json` 记录所有配套文件的 SHA256。CPU 重算仍由脚本独立生成参考。
+
 ## 快速运行
 
 仅在 CPU 上重算 FP64 参考，并审计包内已有的 NPU 输出：
@@ -90,6 +96,19 @@ o = (H @ q) / sqrt(128)
 按 head 独立计算。Q/K 已在捕获前归一化，beta 已 sigmoid；
 这个参考检验状态递推、输出与最终状态，不独立检验归一化和 beta 的前处理。
 NPZ 含固定的算子边界张量和数值输出，不含模型权重、提示词或文本回答。
+
+## 镜像来源确认
+
+FLA `26.9.1+deva4a7958` 是下列官方 A5 镜像自带的版本。
+已从该 manifest 对应的原始 image config 创建全新只读容器读取包版本，
+并确认验证环境中的 FLA 原生库与 Python 绑定 SHA256 与原始镜像一致，
+见 `stock_fla_origin.json`。
+
+可在自己的环境查询实际安装版本：
+
+```bash
+python -c "from importlib.metadata import version; print(version('flash-linear-attention-npu-a5'))"
+```
 
 ## 历史环境
 

@@ -128,7 +128,9 @@
     "FLA": "26.9.1+deva4a7958",
     "CANN": "9.2.0",
     "tested_release_base": "7672a5b509467288a12d7a2cee3451dd939d8b9c",
-    "fix": "538dbee1bfdb1f678e350063b53025897d1d4cd7"
+    "fix": "538dbee1bfdb1f678e350063b53025897d1d4cd7",
+    "ARM64_manifest_digest": "sha256:555ffa772734e39e4277d0c243d7dc3600e9f6ed3ac2c03eae4b3ad331661875"
   },
-  "failure_scope": "The saved input values reproduce the known case; identical shapes with random values are not proven to yield identical failures. This newly packaged direct replay script was CPU-audited, not newly run on NPU."
+  "failure_scope": "The saved input values reproduce the known case; identical shapes with random values are not proven to yield identical failures. This newly packaged direct replay script was CPU-audited, not newly run on NPU.",
+  "FLA_origin_proof": "stock_fla_origin.json"
 }

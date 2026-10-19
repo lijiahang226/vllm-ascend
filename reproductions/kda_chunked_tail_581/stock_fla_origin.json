@@ -1,0 +1,29 @@
+{
+  "checked_at_utc": "2026-10-19T09:20:01.282246+00:00",
+  "official_image_tag": "quay.io/ascend/vllm-ascend:v0.30.0rc2-a5-openeuler",
+  "ARM64_manifest_digest": "sha256:555ffa772734e39e4277d0c243d7dc3600e9f6ed3ac2c03eae4b3ad331661875",
+  "official_image_config_digest": "sha256:6d0b1dd97cbacf336c7e4211b48aefd49aa8580c0907b29871a439d8cec8567a",
+  "stock_read_only_fresh_container_privileged_verified": true,
+  "stock": {
+    "python": "3.12.13",
+    "packages": {
+      "torch": "2.10.0+cpu",
+      "torch-npu": "2.10.0.post7",
+      "flash-linear-attention-npu-a5": "26.9.1+deva4a7958",
+      "vllm": "0.30.0+empty",
+      "vllm-ascend": "0.30.0rc2"
+    },
+    "FLA_files": {
+      "fla_npu/libfla_npu_stable.so": {
+        "sha256": "3a4031a273d29bce91ffc1f9ac9056baa9d2bba238fd0b2fe6dada45ed25d5b9",
+        "bytes": 752624
+      },
+      "fla_npu/ops/ascendc/_stable.py": {
+        "sha256": "d6be8820bb54e0177cf92e396099011402f97066b0974a2f1a8a90187f08aae0",
+        "bytes": 81928
+      }
+    }
+  },
+  "validation_FLA_same_as_stock": true,
+  "comparison": "Exact version and SHA256 equality of FLA stable library and Python binding; no NPU execution required"
+}
