@@ -9,9 +9,14 @@ import torch
 import vllm_ascend.models.glm5next.kda as model_kda
 
 
-@pytest.mark.parametrize(("speculative", "spec_only"), [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize(
+    ("speculative", "spec_only", "empty_non_spec_indices"),
+    [(False, False, False), (True, False, False), (True, True, False), (True, True, True)],
+)
 @pytest.mark.parametrize("dim_first", [False, True])
-def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch, speculative, spec_only, dim_first):
+def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(
+    monkeypatch, speculative, spec_only, empty_non_spec_indices, dim_first
+):
     layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
     torch.nn.Module.__init__(layer)
     layer.prefix = "layer"
@@ -65,7 +70,10 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
             num_decode_tokens=0,
         )
     if spec_only:
-        values.update(num_prefills=0, non_spec_token_indx=None)
+        values.update(
+            num_prefills=0,
+            non_spec_token_indx=torch.empty(0, dtype=torch.int64) if empty_non_spec_indices else None,
+        )
     for name, value in values.items():
         setattr(metadata, name, value)
     prefill_conv = SimpleNamespace(
@@ -159,9 +167,15 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
     def recurrent(q, k, v, gate, beta, state, starts, indices, *args, **kwargs):
         events.append("state_write")
         calls.append("recurrent")
-        assert kwargs.get("output_buffer") is None
         assert q.shape[1] == (2 if speculative else 1)
         torch.testing.assert_close(starts, torch.tensor([0, q.shape[1]]))
+        if spec_only:
+            target = kwargs["output_buffer"]
+            assert torch.isnan(target).all()
+            target.zero_()
+            target[:, : q.shape[1]].copy_(q * 2)
+            return target
+        assert kwargs.get("output_buffer") is None
         return q * 2
 
     def prefill(q, k, v, gate, beta, state, indices, initial, chunk, *args):

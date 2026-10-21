@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -46,16 +47,42 @@ def test_conv_dispatch_passes_contiguous_indices_and_stages_only_ds(monkeypatch,
         return x + 2
 
     def decode(x, state, weight, **kwargs):
+        output = kwargs.pop("out")
+        assert output.is_contiguous() and output.shape == x.shape
+        assert output.dtype == x.dtype and output.device == x.device
+        assert output.data_ptr() != x.data_ptr()
         kwargs["cache_indices"] = kwargs["conv_state_indices"]
         kwargs["conv_states"] = state
-        return prefill(x, weight, **kwargs)
+        output.copy_(prefill(x, weight, **kwargs))
+        return output
 
     monkeypatch.setattr(conv_ops, "copy_conv_state", copy_state)
     monkeypatch.setattr(conv_ops, "causal_conv1d_fn", prefill)
     monkeypatch.setattr(conv_ops, "causal_conv1d_update", decode)
-    result = conv_ops.causal_conv1d(x, torch.ones(4, 8), state, starts, indices, run_mode=run_mode)
+    with patch.object(torch, "zeros_like", wraps=torch.zeros_like) as zeros:
+        result = conv_ops.causal_conv1d(x, torch.ones(4, 8), state, starts, indices, run_mode=run_mode)
+    zeros.assert_not_called()
     torch.testing.assert_close(result, x + 2)
+    torch.testing.assert_close(x, torch.ones_like(x))
     assert calls == ([False, True] if dim_first else [])
     torch.testing.assert_close(state[1:3], torch.full_like(state[1:3], 5))
     assert torch.count_nonzero(state[0]).item() == 0
     assert torch.count_nonzero(state[3:]).item() == 0
+
+
+@pytest.mark.parametrize("run_mode", [0, 1])
+def test_empty_request_batch_returns_zero_output(monkeypatch, run_mode):
+    def unexpected(*args, **kwargs):
+        raise AssertionError("An empty request batch must not launch convolution.")
+
+    monkeypatch.setattr(conv_ops, "causal_conv1d_fn", unexpected)
+    monkeypatch.setattr(conv_ops, "causal_conv1d_update", unexpected)
+    output = conv_ops.causal_conv1d(
+        torch.full((2, 8), float("nan")),
+        torch.ones(4, 8),
+        torch.zeros(4, 3, 8),
+        torch.tensor([0], dtype=torch.int32),
+        torch.empty((0, 1), dtype=torch.int32),
+        run_mode=run_mode,
+    )
+    assert torch.count_nonzero(output) == 0
