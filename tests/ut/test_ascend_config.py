@@ -1365,6 +1365,9 @@ class TestSubconfigPydanticTypeValidation(TestBase):
             config._validate_preconditions(self._oproj_tp_vllm_config(cudagraph_mode=CUDAGraphMode.NONE))
 
     def test_kda_projection_tp_preconditions(self):
+        with self.assertRaisesRegex(ValueError, "requires kda_tensor_parallel_size > 1"):
+            FinegrainedTPConfig(kda_o_proj_mmrs=True)
+
         def deployment():
             vc = self._oproj_tp_vllm_config()
             vc.parallel_config.pipeline_parallel_size = 1
@@ -1375,6 +1378,9 @@ class TestSubconfigPydanticTypeValidation(TestBase):
             config = FinegrainedTPConfig(kda_tensor_parallel_size=size)
             config._validate_preconditions(deployment())
             self.assertEqual(config.kda_tensor_parallel_size, size)
+            FinegrainedTPConfig(kda_tensor_parallel_size=size, kda_o_proj_mmrs=True)._validate_preconditions(
+                deployment()
+            )
         for field in ("tensor_parallel_size", "prefill_context_parallel_size", "pipeline_parallel_size"):
             vc = deployment()
             setattr(vc.parallel_config, field, 2)

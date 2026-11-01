@@ -137,7 +137,9 @@ def test_kda_projection_and_state_sharding(
     monkeypatch.setattr(
         model_kda,
         "get_ascend_config",
-        lambda: SimpleNamespace(finegrained_tp_config=SimpleNamespace(kda_tensor_parallel_size=kda_size)),
+        lambda: SimpleNamespace(
+            finegrained_tp_config=SimpleNamespace(kda_tensor_parallel_size=kda_size, kda_o_proj_mmrs=False)
+        ),
     )
     config = SimpleNamespace(
         model_type="glm5_next",

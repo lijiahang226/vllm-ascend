@@ -1297,6 +1297,7 @@ class FinegrainedTPConfig:
     embedding_tensor_parallel_size: int = 1
     mlp_tensor_parallel_size: int = 1
     kda_tensor_parallel_size: int = 1
+    kda_o_proj_mmrs: bool = False
 
     @model_validator(mode="after")
     def _validate_sizes(self):
@@ -1311,6 +1312,8 @@ class FinegrainedTPConfig:
             value = getattr(self, field_name)
             if value < 0:
                 raise ValueError(f"finegrained_tp_config.{field_name} must be non-negative, got {value}")
+        if self.kda_o_proj_mmrs and self.kda_tensor_parallel_size <= 1:
+            raise ValueError("kda_o_proj_mmrs requires kda_tensor_parallel_size > 1.")
         return self
 
     def _validate_preconditions(self, vllm_config: Any):

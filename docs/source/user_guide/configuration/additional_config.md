@@ -135,6 +135,7 @@ Design / ops (analysis branch): `docs/source/developer_guide/Design_Documents/ru
 | `lmhead_tensor_parallel_size`    | int  | `1` | The custom tensor parallel size of `lm_head`.    |
 | `embedding_tensor_parallel_size` | int  | `1` | The custom tensor parallel size of `embedding`. |
 | `kda_tensor_parallel_size`       | int  | `1` | GLM-5.3-Flash KDA projection TP on PD decode nodes. The recurrent core and state remain DP. |
+| `kda_o_proj_mmrs`                | bool | `false` | Fuse eligible KDA output GEMM and ReduceScatter; requires `kda_tensor_parallel_size > 1`. |
 
 **ascend_compilation_config**
 

@@ -4,6 +4,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, local
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -11,6 +12,53 @@ import torch.nn.functional as F
 
 from vllm_ascend import ascend_forward_context
 from vllm_ascend.models.glm5next import kda_projection_tp
+
+
+@pytest.mark.parametrize("ai_cpu", [False, True])
+def test_fused_projection_uses_kda_group_and_returns_owner_token_shard(monkeypatch, ai_cpu):
+    group = SimpleNamespace(world_size=8, rank_in_group=3, device_group=MagicMock())
+    group.device_group._get_backend.return_value.get_hccl_comm_name.return_value = "kda-dp-axis"
+    profile = MagicMock()
+    profile.supports.side_effect = lambda capability: ai_cpu or capability.name == "GRAPH_MM_REDUCE_SCATTER_FUSION"
+    monkeypatch.setattr(kda_projection_tp, "get_current_hardware_profile", lambda: profile)
+    helper = kda_projection_tp.KDAProjectionTP(group, 64, 128, fuse_o_proj=True)
+    weight = torch.randn(16, 1024, dtype=torch.bfloat16)
+    x = torch.randn(48, 1024, dtype=torch.bfloat16)
+    expected = torch.randn(6, 16, dtype=x.dtype)
+    fused = MagicMock(return_value=(expected, None) if ai_cpu else expected)
+    name = "npu_quant_mm_reduce_scatter" if ai_cpu else "npu_mm_reduce_scatter_base"
+    monkeypatch.setattr(kda_projection_tp.torch_npu, name, fused, raising=False)
+    layer = MagicMock(weight=weight, bias=None, quant_method=kda_projection_tp.UnquantizedLinearMethod())
+    assert helper.project_output(layer, x) is expected
+    args, kwargs = fused.call_args
+    assert args[0] is x
+    torch.testing.assert_close(args[1], weight.t())
+    assert args[2:] == ("kda-dp-axis", 8)
+    assert kwargs["comm_mode"] == ("ai_cpu" if ai_cpu else "aiv")
+    group.device_group._get_backend.return_value.get_hccl_comm_name.assert_called_once_with(3)
+    layer.assert_not_called()
+
+
+@pytest.mark.parametrize("reason", ["disabled", "quantized", "bias", "dtype", "small_k", "strided_weight"])
+def test_unsupported_fusion_preserves_projection_and_reduce_scatter(reason):
+    group = SimpleNamespace(world_size=8, reduce_scatter=MagicMock(return_value=torch.zeros(3, 16)))
+    helper = kda_projection_tp.KDAProjectionTP(group, 64, 128)
+    helper.mmrs_hcom = None if reason == "disabled" else "kda-group"
+    width = 128 if reason == "small_k" else 1024
+    weight = torch.zeros(16, width, dtype=torch.float32 if reason == "dtype" else torch.bfloat16)
+    if reason == "strided_weight":
+        weight = torch.zeros(32, width * 2, dtype=torch.bfloat16)[::2, ::2]
+    x = torch.zeros(24, width, dtype=torch.bfloat16)
+    partial = torch.ones(24, 16)
+    layer = MagicMock(
+        weight=weight,
+        bias=torch.ones(16) if reason == "bias" else None,
+        quant_method=object() if reason == "quantized" else kda_projection_tp.UnquantizedLinearMethod(),
+        return_value=(partial, None),
+    )
+    assert helper.project_output(layer, x) is group.reduce_scatter.return_value
+    layer.assert_called_once_with(x)
+    group.reduce_scatter.assert_called_once_with(partial, dim=0)
 
 
 class CollectiveReference:
