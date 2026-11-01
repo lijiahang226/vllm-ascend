@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.3-Flash KDA layer with separate convolutions and a bounded safe gate."""
 
+from collections.abc import Callable
+from functools import partial
+
 import torch
 from torch import nn
 from transformers import Glm5NextTextConfig
@@ -25,11 +28,14 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
+from vllm_ascend.distributed.parallel_state import get_kda_tp_group
+from vllm_ascend.models.glm5next.kda_projection_tp import KDAProjectionTP
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
 from vllm_ascend.models.glm5next.recoverssm_config import use_glm_recoverssm
@@ -56,8 +62,8 @@ def get_kda_parallel_size(parallel_config: ParallelConfig) -> int:
 class PCPColumnParallelLinear(ColumnParallelLinear):
     """Column-parallel projection using PCP ranks and collectives."""
 
-    def __init__(self, input_size: int, output_size: int, **kwargs) -> None:
-        pcp_group = get_pcp_group()
+    def __init__(self, input_size: int, output_size: int, *, tp_group=None, **kwargs) -> None:
+        pcp_group = get_pcp_group() if tp_group is None else tp_group
         super().__init__(
             input_size,
             output_size,
@@ -80,8 +86,8 @@ class PCPColumnParallelLinear(ColumnParallelLinear):
 class PCPRowParallelLinear(RowParallelLinear):
     """Row-parallel projection reducing head contributions over PCP."""
 
-    def __init__(self, input_size: int, output_size: int, **kwargs) -> None:
-        pcp_group = get_pcp_group()
+    def __init__(self, input_size: int, output_size: int, *, tp_group=None, **kwargs) -> None:
+        pcp_group = get_pcp_group() if tp_group is None else tp_group
         # The pinned RowParallelLinear has no rank/size overrides. Allocate
         # the local input shard, then bind its inherited weight loaders to PCP.
         super().__init__(divide(input_size, pcp_group.world_size), output_size, disable_tp=True, **kwargs)
@@ -266,9 +272,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.pcp_size = self.pcp_group.world_size
         self.pcp_rank = self.pcp_group.rank_in_group
         self.use_pcp_head_sharding = self.tp_size == 1 and self.pcp_size > 1
-        column_linear = ColumnParallelLinear
-        merged_linear = _Glm5NextMergedColumnParallelLinear
-        row_linear = RowParallelLinear
+        column_linear: Callable[..., ColumnParallelLinear] = ColumnParallelLinear
+        merged_linear: Callable[..., MergedColumnParallelLinear] = _Glm5NextMergedColumnParallelLinear
+        row_linear: Callable[..., RowParallelLinear] = RowParallelLinear
         if self.use_pcp_head_sharding:
             self.tp_size = get_kda_parallel_size(vllm_config.parallel_config)
             self.tp_rank = self.pcp_rank
@@ -284,6 +290,17 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
         projection_size = self.head_dim * self.num_heads
         self.local_projection_size = divide(projection_size, self.tp_size)
+        state_column_linear = column_linear
+        projection_tp_size = self.tp_size
+        self.projection_tp: KDAProjectionTP | None = None
+        kda_tp_size = get_ascend_config().finegrained_tp_config.kda_tensor_parallel_size
+        if kda_tp_size > 1:
+            group = get_kda_tp_group()
+            projection_tp_size = group.world_size
+            self.projection_tp = KDAProjectionTP(group, self.num_heads, self.head_dim)
+            column_linear = partial(PCPColumnParallelLinear, tp_group=group)
+            merged_linear = partial(PCPGlm5NextMergedColumnParallelLinear, tp_group=group)
+            row_linear = partial(PCPRowParallelLinear, tp_group=group, reduce_results=False)
 
         # Merge q, k, v, b, f_a, g_a projections into one GEMM (6→1 launches).
         # Order matches checkpoint's fused_qkvbfg_a_proj convention.
@@ -299,7 +316,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 self.head_dim,  # g_a (shard 5, replicated)
             ],
             replicated_shard_ids=(4, 5),
-            tp_size=self.tp_size,
+            tp_size=projection_tp_size,
             bias=False,
             quant_config=self.quant_config,
             prefix=f"{prefix}.in_proj_qkvbfg_a",
@@ -316,21 +333,21 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
         set_weight_attrs(self.dt_bias, {"weight_loader": self._dt_bias_weight_loader})
 
-        self.q_conv1d = column_linear(
+        self.q_conv1d = state_column_linear(
             input_size=self.conv_size,
             output_size=projection_size,
             bias=False,
             params_dtype=torch.float32,
             prefix=f"{prefix}.q_conv1d",
         )
-        self.k_conv1d = column_linear(
+        self.k_conv1d = state_column_linear(
             input_size=self.conv_size,
             output_size=projection_size,
             bias=False,
             params_dtype=torch.float32,
             prefix=f"{prefix}.k_conv1d",
         )
-        self.v_conv1d = column_linear(
+        self.v_conv1d = state_column_linear(
             input_size=self.conv_size,
             output_size=projection_size,
             bias=False,
@@ -375,6 +392,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             quant_config=saved_quant_config,
             prefix=f"{prefix}.o_proj",
         )
+        if self.projection_tp is not None and getattr(self.o_proj, "quant_bias", None) is not None:
+            raise ValueError(
+                "KDA projection TP does not support static quantized o_proj with quant_bias. "
+                "Keep o_proj unquantized or disable kda_tensor_parallel_size."
+            )
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -408,6 +430,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
+        if self.projection_tp is not None:
+            output = hidden_states.new_empty((hidden_states.shape[0], self.hidden_size))
+            torch.ops.vllm.glm5next_kda_projection_tp_forward(hidden_states, output, self.prefix)
+            return output
         attn_metadata_raw = get_forward_context().attn_metadata
         attn_metadata = attn_metadata_raw.get(self.prefix) if isinstance(attn_metadata_raw, dict) else None
         pcp_context = getattr(attn_metadata, "pcp_context", None)
@@ -746,6 +772,25 @@ def glm5next_kda_forward_fake(
     layer_name: str,
 ) -> None:
     return
+
+
+def glm5next_kda_projection_tp_forward(hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str) -> None:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    projection_tp = layer.projection_tp
+    assert projection_tp is not None
+    projection_tp.forward(layer, hidden_states, output)
+
+
+def glm5next_kda_projection_tp_forward_fake(hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="glm5next_kda_projection_tp_forward",
+    op_func=glm5next_kda_projection_tp_forward,
+    mutates_args=["output"],
+    fake_impl=glm5next_kda_projection_tp_forward_fake,
+)
 
 
 direct_register_custom_op(

@@ -17,11 +17,40 @@ def test_glm_kda_backend_declares_pcp_support() -> None:
     assert backend.get_builder_cls() is model_kda.AscendGDNHostMetadataBackend.get_builder_cls()
 
 
+def test_projection_tp_keeps_live_metadata_outside_dynamo_trace(monkeypatch):
+    layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
+    torch.nn.Module.__init__(layer)
+    layer.prefix = "projection_tp"
+    layer.hidden_size = 4
+    context = SimpleNamespace(attn_metadata=None, no_compile_layers={layer.prefix: layer})
+    seen = []
+
+    def project(owner, hidden, output):
+        seen.append(context.attn_metadata)
+        output.copy_(hidden * (0 if context.attn_metadata is None else 2))
+
+    layer.projection_tp = SimpleNamespace(forward=project)
+    monkeypatch.setattr(model_kda, "get_forward_context", lambda: context)
+    hidden = torch.arange(12, dtype=torch.float32).view(3, 4)
+    library = torch.library.Library("vllm", "IMPL", "CPU")
+    try:
+        library.impl("glm5next_kda_projection_tp_forward", model_kda.glm5next_kda_projection_tp_forward)
+        with torch.inference_mode():
+            compiled = torch.compile(layer, backend="eager", fullgraph=True)
+            torch.testing.assert_close(compiled(hidden, torch.arange(3)), torch.zeros_like(hidden))
+            context.attn_metadata = {"live": True}
+            torch.testing.assert_close(compiled(hidden, torch.arange(3)), hidden * 2)
+    finally:
+        library._destroy()
+    assert seen == [None, {"live": True}]
+
+
 @pytest.mark.parametrize("pcp_rank", [0, 1])
 @pytest.mark.parametrize("has_prefill", [False, True])
 def test_kda_pcp_restores_prefill_and_skips_decode_gather(monkeypatch, pcp_rank, has_prefill):
     layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
     torch.nn.Module.__init__(layer)
+    layer.projection_tp = None
     layer.prefix = "layer"
     layer.local_projection_size = 2
     layer.local_num_heads = 1
