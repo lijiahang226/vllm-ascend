@@ -135,11 +135,13 @@ def test_kda_projection_and_state_sharding(
     kda_group = SimpleNamespace(world_size=kda_size, rank_in_group=kda_size - 1)
     monkeypatch.setattr(model_kda, "get_kda_tp_group", lambda: kda_group)
     monkeypatch.setattr(
+        "vllm_ascend.models.glm5next.kda_projection_tp.get_current_hardware_profile",
+        lambda: SimpleNamespace(supports=lambda _: False),
+    )
+    monkeypatch.setattr(
         model_kda,
         "get_ascend_config",
-        lambda: SimpleNamespace(
-            finegrained_tp_config=SimpleNamespace(kda_tensor_parallel_size=kda_size, kda_o_proj_mmrs=False)
-        ),
+        lambda: SimpleNamespace(finegrained_tp_config=SimpleNamespace(kda_tensor_parallel_size=kda_size)),
     )
     config = SimpleNamespace(
         model_type="glm5_next",

@@ -21,7 +21,7 @@ def test_fused_projection_uses_kda_group_and_returns_owner_token_shard(monkeypat
     profile = MagicMock()
     profile.supports.side_effect = lambda capability: ai_cpu or capability.name == "GRAPH_MM_REDUCE_SCATTER_FUSION"
     monkeypatch.setattr(kda_projection_tp, "get_current_hardware_profile", lambda: profile)
-    helper = kda_projection_tp.KDAProjectionTP(group, 64, 128, fuse_o_proj=True)
+    helper = kda_projection_tp.KDAProjectionTP(group, 64, 128)
     weight = torch.randn(16, 1024, dtype=torch.bfloat16)
     x = torch.randn(48, 1024, dtype=torch.bfloat16)
     expected = torch.randn(6, 16, dtype=x.dtype)
@@ -39,11 +39,14 @@ def test_fused_projection_uses_kda_group_and_returns_owner_token_shard(monkeypat
     layer.assert_not_called()
 
 
-@pytest.mark.parametrize("reason", ["disabled", "quantized", "bias", "dtype", "small_k", "strided_weight"])
-def test_unsupported_fusion_preserves_projection_and_reduce_scatter(reason):
+@pytest.mark.parametrize("reason", ["unsupported_hardware", "quantized", "bias", "dtype", "small_k", "strided_weight"])
+def test_unsupported_fusion_preserves_projection_and_reduce_scatter(monkeypatch, reason):
+    monkeypatch.setattr(
+        kda_projection_tp, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: False)
+    )
     group = SimpleNamespace(world_size=8, reduce_scatter=MagicMock(return_value=torch.zeros(3, 16)))
     helper = kda_projection_tp.KDAProjectionTP(group, 64, 128)
-    helper.mmrs_hcom = None if reason == "disabled" else "kda-group"
+    helper.mmrs_hcom = None if reason == "unsupported_hardware" else "kda-group"
     width = 128 if reason == "small_k" else 1024
     weight = torch.zeros(16, width, dtype=torch.float32 if reason == "dtype" else torch.bfloat16)
     if reason == "strided_weight":
@@ -90,6 +93,9 @@ class CollectiveReference:
 @pytest.mark.parametrize("size", [2, 4])
 @pytest.mark.parametrize("runner_v2", [False, True])
 def test_projection_tp_matches_dense_weights_with_ragged_and_idle_owners(monkeypatch, size, runner_v2):
+    monkeypatch.setattr(
+        kda_projection_tp, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: False)
+    )
     generator = torch.Generator().manual_seed(91)
     hidden_dim, heads, dim = 7, 8, 2
     width = heads * dim

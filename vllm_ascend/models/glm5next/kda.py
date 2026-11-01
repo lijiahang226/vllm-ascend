@@ -293,14 +293,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         state_column_linear = column_linear
         projection_tp_size = self.tp_size
         self.projection_tp: KDAProjectionTP | None = None
-        finegrained_tp = get_ascend_config().finegrained_tp_config
-        kda_tp_size = finegrained_tp.kda_tensor_parallel_size
+        kda_tp_size = get_ascend_config().finegrained_tp_config.kda_tensor_parallel_size
         if kda_tp_size > 1:
             group = get_kda_tp_group()
             projection_tp_size = group.world_size
-            self.projection_tp = KDAProjectionTP(
-                group, self.num_heads, self.head_dim, fuse_o_proj=finegrained_tp.kda_o_proj_mmrs
-            )
+            self.projection_tp = KDAProjectionTP(group, self.num_heads, self.head_dim)
             column_linear = partial(PCPColumnParallelLinear, tp_group=group)
             merged_linear = partial(PCPGlm5NextMergedColumnParallelLinear, tp_group=group)
             row_linear = partial(PCPRowParallelLinear, tp_group=group, reduce_results=False)

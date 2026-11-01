@@ -46,8 +46,6 @@ The size defaults to `1` and must divide both `data_parallel_size` and the KDA h
 
 Static quantized output projections with `quant_bias`, including static W8A8 and W8A8_MIX, are rejected because their bias handling does not use the KDA group. Keep KDA `o_proj` unquantized or disable KDA projection TP for these checkpoints.
 
-Set `finegrained_tp_config.kda_o_proj_mmrs` to `true` to fuse the output GEMM and ReduceScatter within the KDA group. It defaults to `false`. For group sizes 2, 4 and 8, eligible bias-free FP16/BF16 projections use AIV communication on A2/A3, or the V2 AI CPU interface on A5. Quantized projections and unsupported shapes retain separate GEMM and ReduceScatter. Measure decode latency with the intended batch sizes before enabling this option.
-
 For example, use D TP1/DP8/EP8 with:
 
 ```bash
@@ -242,7 +240,6 @@ All knobs live under `finegrained_tp_config` inside `--additional-config`. The d
 | `lmhead_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the LM head. |
 | `embedding_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the token embedding table. |
 | `kda_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` and the KDA head count | GLM-5.3-Flash [KDA projection TP](#kda-projection-tp) on a PD decode node with TP=1, PCP=1 and PP=1. |
-| `kda_o_proj_mmrs` | bool | false | No | true/false | Fuse eligible KDA output projections and ReduceScatter; requires KDA projection TP. |
 
 ## Experimental Results
 

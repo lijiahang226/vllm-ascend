@@ -23,7 +23,7 @@ class KDAProjectionTP:
     MAX_MMRS_K = 65535
     MAX_MMRS_COMM_BYTES = 16 * 256 * 1024 * 1024
 
-    def __init__(self, group: GroupCoordinator, num_heads: int, head_dim: int, *, fuse_o_proj: bool = False):
+    def __init__(self, group: GroupCoordinator, num_heads: int, head_dim: int):
         self.group = group
         self.size = group.world_size
         self.heads = num_heads // self.size
@@ -31,7 +31,7 @@ class KDAProjectionTP:
         self.width = self.heads * head_dim
         self.mmrs_hcom: str | None = None
         self.mmrs_ai_cpu = False
-        if fuse_o_proj and self.size in (2, 4, 8):
+        if self.size in (2, 4, 8):
             profile = get_current_hardware_profile()
             self.mmrs_ai_cpu = profile.supports(HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE)
             if self.mmrs_ai_cpu or profile.supports(HardwareCapability.GRAPH_MM_REDUCE_SCATTER_FUSION):
