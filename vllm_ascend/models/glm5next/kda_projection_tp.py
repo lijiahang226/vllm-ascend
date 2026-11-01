@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from .kda import Glm5NextLinearAttention
 
 
-class KDAProjectionTP:
+class KDATPLayout:
     def __init__(self, group: GroupCoordinator, num_heads: int, head_dim: int):
         self.group = group
         self.size = group.world_size
@@ -28,6 +28,8 @@ class KDAProjectionTP:
         dist.all_to_all_single(output, tensor, group=self.group.device_group)
         return output
 
+
+class KDAProjectionTP(KDATPLayout):
     def gather_projected_heads(
         self, qkv: torch.Tensor, forget: torch.Tensor, gate: torch.Tensor, beta: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
