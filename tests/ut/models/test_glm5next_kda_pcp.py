@@ -179,10 +179,6 @@ def test_kda_projection_and_state_sharding(
             )
 
         monkeypatch.setattr(model_kda.RowParallelLinear, "__init__", init_static_row)
-    if static_output_bias and kda_size > 1:
-        with pytest.raises(ValueError, match="static quantized o_proj"):
-            model_kda.Glm5NextLinearAttention(config, vllm_config, prefix="model.layers.0.linear_attn")
-        return
     layer = model_kda.Glm5NextLinearAttention(config, vllm_config, prefix="model.layers.0.linear_attn")
     assert layer.pcp_group is parallel_groups
     assert layer.pcp_size == pcp_size
@@ -196,7 +192,7 @@ def test_kda_projection_and_state_sharding(
     projection_size = kda_size if kda_size > 1 else size
     use_group_projections = layer.use_pcp_head_sharding or kda_size > 1
     assert isinstance(layer.in_proj_qkvbfg_a, model_kda.PCPGlm5NextMergedColumnParallelLinear) == use_group_projections
-    assert isinstance(layer.o_proj, model_kda.PCPRowParallelLinear) == use_group_projections
+    assert isinstance(layer.o_proj, model_kda.PCPRowParallelLinear) == layer.use_pcp_head_sharding
     for name in ("f_b_proj", "g_b_proj"):
         projection = getattr(layer, name)
         assert isinstance(projection, model_kda.PCPColumnParallelLinear) == use_group_projections
@@ -206,7 +202,9 @@ def test_kda_projection_and_state_sharding(
         assert isinstance(projection, model_kda.PCPColumnParallelLinear) == layer.use_pcp_head_sharding
         assert projection.weight.shape[0] == 1024 // size
     assert layer.in_proj_qkvbfg_a.weight.shape[0] == 3 * 1024 // projection_size + 8 // projection_size + 2 * 128
-    assert layer.o_proj.weight.shape == (16, 1024 // projection_size)
+    assert layer.o_proj.weight.shape == (16, 1024 // size)
+    if static_output_bias:
+        assert layer.o_proj.quant_bias.shape == (16,)
     assert layer.get_state_shape() == Glm5NextForCausalLM.get_mamba_state_shape_from_config(vllm_config)
     assert layer.get_state_shape()[1] == (8 // size, 128, 128)
 

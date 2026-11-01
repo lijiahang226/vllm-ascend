@@ -42,11 +42,6 @@ class KDAProjectionTP:
         beta = beta.permute(1, 0, 2).reshape(1, tokens, -1)
         return qkv, forget, gate, beta
 
-    def gather_output_tokens(self, output: torch.Tensor) -> torch.Tensor:
-        tokens = output.shape[0]
-        by_head = output.view(tokens, self.size, self.width).permute(1, 0, 2).contiguous()
-        return self._all_to_all(by_head).reshape(self.size * tokens, self.width)
-
     def forward(self, layer: "Glm5NextLinearAttention", hidden: torch.Tensor, output: torch.Tensor) -> None:
         local_tokens = hidden.shape[0]
         capacity = max(local_tokens, _EXTRA_CTX.max_tokens_across_dp or local_tokens)
@@ -65,7 +60,5 @@ class KDAProjectionTP:
         # load/copy ordering; only projected activations cross the DP ranks.
         core = hidden.new_zeros((1, capacity, layer.num_heads, self.head_dim))
         torch.ops.vllm.glm5next_kda_forward(qkv, forget, beta, gate, core, layer.prefix)
-        sharded = self.gather_output_tokens(core.flatten(2).squeeze(0))
-        partial = layer.o_proj(sharded)[0]
-        reduced = self.group.reduce_scatter(partial, dim=0)
-        output.copy_(reduced[:local_tokens])
+        projected_output = layer.o_proj(core.flatten(2).squeeze(0))[0]
+        output.copy_(projected_output[:local_tokens])

@@ -38,18 +38,16 @@ Fine-grained TP is designed for the **decode instance** of PD separation, where 
 
 ### KDA Projection TP
 
-For GLM-5.3-Flash, set `finegrained_tp_config.kda_tensor_parallel_size` to shard the merged Q/K/V/beta/low-rank input projection, the forget/gate up-projections, and the output projection. SFA and the recurrent KDA core retain the normal deployment layout. Convolution weights, recurrent state, cache indices, prefix-cache state and speculative rollback remain local to the request's DP owner.
+For GLM-5.3-Flash, set `finegrained_tp_config.kda_tensor_parallel_size` to shard the merged Q/K/V/beta/low-rank input projection and the forget/gate up-projections. The output projection is controlled independently by `oproj_tensor_parallel_size`. SFA and the recurrent KDA core retain the normal deployment layout. Convolution weights, recurrent state, cache indices, prefix-cache state and speculative rollback remain local to the request's DP owner.
 
-The path exchanges activations in this order: hidden AllGather, sharded projections, AllToAll to restore each owner's full heads, local KDA core, AllToAll to collect tokens for the output head shard, output projection, and ReduceScatter back to the request owner. Both AllToAll operations contribute to latency; this is not persistent head-sharded recurrent-state execution.
+The KDA path exchanges activations in this order: hidden AllGather, sharded input projections, AllToAll to restore each owner's full heads, and local KDA core. The owner's full-head result then enters the ordinary output projection. KDA TP adds no output AllToAll or ReduceScatter; any output sharding and communication belong to the independent o-projection TP path. This is not persistent head-sharded recurrent-state execution.
 
 The size defaults to `1` and must divide both `data_parallel_size` and the KDA head count. The initial scope is a GLM-5.3-Flash P/D decode node with TP=1, PCP=1 and PP=1. The normal DP token metadata supplies the common padded exchange size, including idle ranks. This path retains DP step coordination even when MC2 could otherwise skip it. No cache format or P-node setting changes are required.
-
-Static quantized output projections with `quant_bias`, including static W8A8 and W8A8_MIX, are rejected because their bias handling does not use the KDA group. Keep KDA `o_proj` unquantized or disable KDA projection TP for these checkpoints.
 
 For example, use D TP1/DP8/EP8 with:
 
 ```bash
---additional-config '{"finegrained_tp_config":{"kda_tensor_parallel_size":4}}'
+--additional-config '{"finegrained_tp_config":{"kda_tensor_parallel_size":8,"oproj_tensor_parallel_size":1}}'
 ```
 
 Compare size `1` against `2`, `4` and `8` with identical workload, cache precision, MTP and graph settings. Validate complete answers and effective worker settings before interpreting throughput results. The DeepSeek measurements below do not measure this KDA path.

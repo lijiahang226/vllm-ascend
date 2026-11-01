@@ -300,7 +300,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self.projection_tp = KDAProjectionTP(group, self.num_heads, self.head_dim)
             column_linear = partial(PCPColumnParallelLinear, tp_group=group)
             merged_linear = partial(PCPGlm5NextMergedColumnParallelLinear, tp_group=group)
-            row_linear = partial(PCPRowParallelLinear, tp_group=group, reduce_results=False)
 
         # Merge q, k, v, b, f_a, g_a projections into one GEMM (6→1 launches).
         # Order matches checkpoint's fused_qkvbfg_a_proj convention.
@@ -392,12 +391,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             quant_config=saved_quant_config,
             prefix=f"{prefix}.o_proj",
         )
-        if self.projection_tp is not None and getattr(self.o_proj, "quant_bias", None) is not None:
-            raise ValueError(
-                "KDA projection TP does not support static quantized o_proj with quant_bias. "
-                "Keep o_proj unquantized or disable kda_tensor_parallel_size."
-            )
-
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
