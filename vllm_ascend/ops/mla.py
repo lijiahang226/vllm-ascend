@@ -213,6 +213,12 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         # Ascend retains its own attention/indexer layout for both values.
         del allow_short_prefill_indexer_scoring_skip, shardq_eligible
         hf_config = get_current_vllm_config().model_config.hf_text_config
+        attn_backend = None
+        if getattr(hf_config, "architectures", None) == ["Glm54DummyForCausalLM"]:
+            # Imported here because the model backend also imports Ascend MLA.
+            from vllm_ascend.models.glm54.attention import Glm54SFABackend
+
+            attn_backend = Glm54SFABackend
         self.tp_size = get_tensor_model_parallel_world_size()
         self.layers = hf_config.num_hidden_layers
         if mla_modules.indexer is not None:
@@ -226,6 +232,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         # vllm_ascend.attention.mla_v1) instead of mutating the shared upstream
         # MLAAttention class.
         self.mla_attn = AscendMLAAttention(
+            attn_backend=attn_backend,
             num_heads=num_heads,
             scale=scale,
             qk_nope_head_dim=self.qk_nope_head_dim,

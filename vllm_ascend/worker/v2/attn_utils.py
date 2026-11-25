@@ -95,6 +95,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     reshape_kv_cache_tensors_for_sparse_kv_offload,
 )
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
+from vllm_ascend.models.glm54.cache_config import Glm54WindowCacheSpec, allocate_glm54_cache, is_glm54_dummy
 from vllm_ascend.models.qwen4_exp.cache_config import (
     GDN,
     HIDDEN,
@@ -689,7 +690,7 @@ def _get_attention_kv_cache_dims(
     layer_name: str,
     kv_cache_spec: AttentionSpec,
 ) -> tuple[int, int]:
-    if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
+    if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, Glm54WindowCacheSpec)):
         attn_layers = get_layers_from_vllm_config(get_current_vllm_config(), AttentionLayerBase, [layer_name])
         attn_layer = attn_layers[layer_name]
         if not isinstance(attn_layer, MLAAttention):
@@ -1012,6 +1013,12 @@ def _allocate_kv_cache(
             for name, parts in caches.items()
         }
     # init kv cache tensors
+    if is_glm54_dummy(vllm_config):
+        return allocate_glm54_cache(
+            vllm_config,
+            kv_cache_config,
+            lambda size: _allocate_int8_cache_tensor(size, KV_CACHE_BUFFER_ALIGNMENT, device),
+        )
     kv_cache_raw_tensors: dict[str, Any] = {}
     # prefill disaggregation need the addr of cache tensor be aligned with 2M
     alignment = KV_CACHE_BUFFER_ALIGNMENT
@@ -2030,7 +2037,7 @@ def _reshape_kv_cache_v2(
                 cache = torch.as_strided(typed_slot, size=shape, stride=tuple(strides))
                 kv_caches[layer_name] = (cache,)
                 continue
-            if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)):
+            if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec, Glm54WindowCacheSpec)):
                 num_blocks_, block_size_, num_kv_heads, _ = kv_cache_shape
                 k_dim, v_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
                 k_shape = (num_blocks_, block_size_, num_kv_heads, k_dim)
@@ -2071,7 +2078,7 @@ def _reshape_kv_cache_v2(
             else:
                 if k_dtype != v_dtype:
                     raise ValueError("Combined hybrid K/V cache requires matching K/V dtypes.")
-                if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)):
+                if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec, Glm54WindowCacheSpec)):
                     k_cache, v_cache = _reshape_combined_mla_kv_cache(
                         raw_cache, k_shape, v_shape, k_dtype, page_stride_bytes, num_blocks_per_kv_block
                     )

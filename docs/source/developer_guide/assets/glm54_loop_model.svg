@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="706" viewBox="0 0 800 706">
+<defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto-start-reverse"><path d="M0,0 L7,3.5 L0,7" fill="#526274"/></marker></defs>
+<rect width="800" height="100%" fill="#fff"/>
+<rect x="24" y="18" width="332" height="50" rx="6" fill="#fff7ed" stroke="#d2ad7b" stroke-width="1.2"/>
+<text x="190.0" y="37.5" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="15" fill="#243447"><tspan x="190.0" dy="0">Token embedding</tspan><tspan x="190.0" dy="21">TP AllReduce</tspan></text>
+<rect x="24" y="96" width="332" height="44" rx="6" fill="#f8fafc" stroke="#b9c5d2" stroke-width="1.2"/>
+<text x="190.0" y="123.0" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="15" fill="#243447"><tspan x="190.0" dy="0">Prelude · L0–1</tspan></text>
+<rect x="24" y="168" width="332" height="48" rx="6" fill="#f0f6ff" stroke="#8caed2" stroke-width="1.2"/>
+<text x="190.0" y="197.0" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="15" fill="#243447"><tspan x="190.0" dy="0">Loop Pass 1 · L2–3</tspan></text>
+<rect x="24" y="247" width="332" height="74" rx="6" fill="#f8fafc" stroke="#b9c5d2" stroke-width="1.2"/>
+<text x="190.0" y="278.5" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="14" fill="#243447"><tspan x="190.0" dy="0">DampGate 1 · RMSNorm → Linear → sigmoid</tspan><tspan x="190.0" dy="21">x₁ = x₀ + β₁(h₁ − x₀)</tspan></text>
+<rect x="24" y="352" width="332" height="48" rx="6" fill="#f0f6ff" stroke="#8caed2" stroke-width="1.2"/>
+<text x="190.0" y="381.0" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="15" fill="#243447"><tspan x="190.0" dy="0">Loop Pass 2 · 同一组 L2–3 权重</tspan></text>
+<rect x="24" y="431" width="332" height="74" rx="6" fill="#f8fafc" stroke="#b9c5d2" stroke-width="1.2"/>
+<text x="190.0" y="462.5" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="14" fill="#243447"><tspan x="190.0" dy="0">DampGate 2 · RMSNorm → Linear → sigmoid</tspan><tspan x="190.0" dy="21">x₂ = x₁ + β₂(h₂ − x₁)</tspan></text>
+<rect x="24" y="536" width="332" height="44" rx="6" fill="#f8fafc" stroke="#b9c5d2" stroke-width="1.2"/>
+<text x="190.0" y="563.0" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="15" fill="#243447"><tspan x="190.0" dy="0">Coda · L4–5</tspan></text>
+<rect x="24" y="610" width="332" height="68" rx="6" fill="#fff7ed" stroke="#d2ad7b" stroke-width="1.2"/>
+<text x="190.0" y="638.5" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="15" fill="#243447"><tspan x="190.0" dy="0">Final RMSNorm → LM head</tspan><tspan x="190.0" dy="21">TP AllGather logits → Sampling</tspan></text>
+<polyline points="190,68 190,96" fill="none" stroke="#526274" stroke-width="1.4" stroke-dasharray="0" marker-end="url(#arrow)"/>
+<polyline points="190,140 190,168" fill="none" stroke="#526274" stroke-width="1.4" stroke-dasharray="0" marker-end="url(#arrow)"/>
+<polyline points="190,216 190,247" fill="none" stroke="#526274" stroke-width="1.4" stroke-dasharray="0" marker-end="url(#arrow)"/>
+<polyline points="190,321 190,352" fill="none" stroke="#526274" stroke-width="1.4" stroke-dasharray="0" marker-end="url(#arrow)"/>
+<polyline points="190,400 190,431" fill="none" stroke="#526274" stroke-width="1.4" stroke-dasharray="0" marker-end="url(#arrow)"/>
+<polyline points="190,505 190,536" fill="none" stroke="#526274" stroke-width="1.4" stroke-dasharray="0" marker-end="url(#arrow)"/>
+<polyline points="190,580 190,610" fill="none" stroke="#526274" stroke-width="1.4" stroke-dasharray="0" marker-end="url(#arrow)"/>
+<rect x="450" y="165" width="326" height="64" rx="6" fill="#f0faf6" stroke="#78b29c" stroke-width="1.2"/>
+<text x="613.0" y="191.5" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="14" fill="#243447"><tspan x="613.0" dy="0">第一遍 KV₁ + 每层保存的 I₁</tspan><tspan x="613.0" dy="21">各 TP rank 的 KV latent / 索引副本</tspan></text>
+<polyline points="356,192 450,192" fill="none" stroke="#526274" stroke-width="1.4" stroke-dasharray="0" marker-end="url(#arrow)"/>
+<polyline points="608,229 608,332 340,332 340,352" fill="none" stroke="#526274" stroke-width="1.4" stroke-dasharray="0" marker-end="url(#arrow)"/>
+<text x="610" y="303" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="14" fill="#243447"><tspan x="610" dy="0">第二遍只读 KV₁，复用 I₁</tspan></text>
+<rect x="450" y="352" width="326" height="64" rx="6" fill="#f0faf6" stroke="#78b29c" stroke-width="1.2"/>
+<text x="613.0" y="378.5" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="14" fill="#243447"><tspan x="613.0" dy="0">第二遍独立 KV₂</tspan><tspan x="613.0" dy="21">每个 query 读取最近 128 个位置</tspan></text>
+<polyline points="356,376 450,376" fill="none" stroke="#526274" stroke-width="1.4" stroke-dasharray="0" marker-end="url(#arrow)"/>
+<polyline points="450,389 356,389" fill="none" stroke="#526274" stroke-width="1.4" stroke-dasharray="0" marker-end="url(#arrow)"/>
+<text x="402" y="366" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="12" fill="#243447"><tspan x="402" dy="0">写 / 读</tspan></text>
+<text x="610" y="445" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="14" fill="#243447"><tspan x="610" dy="0">KV₁[I₁] 与 KV₂[window] 共同 softmax</tspan><tspan x="610" dy="21">同一 token 位置的两份表示均保留</tspan></text>
+<text x="610" y="535" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="14" fill="#243447"><tspan x="610" dy="0">6 个物理层 · 8 次层执行</tspan><tspan x="610" dy="21">两遍的 attention、MoE 都重新计算</tspan></text>
+<polyline points="190,151 12,151 12,284 24,284" fill="none" stroke="#526274" stroke-width="1.4" stroke-dasharray="5" marker-end="url(#arrow)"/>
+<text x="86" y="145" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="14" fill="#243447"><tspan x="86" dy="0">x₀</tspan></text>
+<polyline points="190,337 12,337 12,468 24,468" fill="none" stroke="#526274" stroke-width="1.4" stroke-dasharray="5" marker-end="url(#arrow)"/>
+<text x="86" y="331" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="14" fill="#243447"><tspan x="86" dy="0">x₁</tspan></text>
+</svg>

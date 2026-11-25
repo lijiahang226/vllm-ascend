@@ -111,6 +111,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.models.glm54.cache_config import is_glm54_cache_groups
 from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
@@ -882,6 +883,8 @@ class NPUWorker(GPUWorker):
             return available_memory
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
         if not kv_cache_groups:
+            return available_memory
+        if is_glm54_cache_groups(kv_cache_groups):
             return available_memory
         # Ascend's DSV4/V4.1 and GLM-Next planners already account for shared
         # physical storage across all groups. Their budgets must not take the

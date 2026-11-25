@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="730" viewBox="0 0 900 730">
+<rect width="900" height="730" fill="white"/>
+<defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7" fill="#637386"/></marker></defs>
+<text x="24" y="30" text-anchor="start" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="21" fill="#243447">GLM-5.4：按缓存职责分组</text>
+<text x="24" y="58" text-anchor="start" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="14" fill="#243447">分组只依赖历史保留策略；增加层数只扩展组内成员。不同窗口长度分别成组。</text>
+<rect x="24" y="84" width="530" height="76" rx="4" fill="#f0f6ff" stroke="#b5c3d1"/>
+<text x="42" y="113" text-anchor="start" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="17" fill="#243447">G0 · Full 历史组</text>
+<text x="42" y="140" text-anchor="start" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="15" fill="#243447">非循环层 + loop1 MLA + 对应 indexer</text>
+<path d="M554,122 L635,122" stroke="#637386" stroke-width="1.4" marker-end="url(#arrow)"/>
+<rect x="642" y="84" width="234" height="76" rx="4" fill="#f0f6ff" stroke="#b5c3d1"/>
+<text x="759" y="112" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="15" fill="#243447">独立 block table</text>
+<text x="759" y="139" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="16" fill="#243447">[17, 38, …]</text>
+<rect x="24" y="183" width="530" height="76" rx="4" fill="#f0faf6" stroke="#b5c3d1"/>
+<text x="42" y="212" text-anchor="start" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="17" fill="#243447">G1 · Loop2 滑窗组</text>
+<text x="42" y="239" text-anchor="start" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="15" fill="#243447">第二遍 KV；窗口 W = 128</text>
+<path d="M554,221 L635,221" stroke="#637386" stroke-width="1.4" marker-end="url(#arrow)"/>
+<rect x="642" y="183" width="234" height="76" rx="4" fill="#f0faf6" stroke="#b5c3d1"/>
+<text x="759" y="211" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="15" fill="#243447">独立 block table</text>
+<text x="759" y="238" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="16" fill="#243447">[0, 79, 84, …]</text>
+<text x="450" y="290" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="15" fill="#243447">共用一个 BlockPool；两组活跃 ID 互斥；0 为 null block。</text>
+<text x="24" y="331" text-anchor="start" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="16" fill="#243447">物理页视图：以 6 层 dummy 为例，列宽按原生页字节数绘制</text>
+<text x="82" y="366" text-anchor="end" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="14" fill="#243447">ID</text>
+<text x="157.6" y="366" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="14" fill="#243447">L0</text>
+<text x="272.8" y="366" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="14" fill="#243447">L1</text>
+<text x="388.0" y="366" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="14" fill="#243447">L2</text>
+<text x="503.20000000000005" y="366" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="14" fill="#243447">L3</text>
+<text x="618.4" y="366" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="14" fill="#243447">L4</text>
+<text x="733.6" y="366" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="14" fill="#243447">L5</text>
+<text x="82" y="419" text-anchor="end" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="16" fill="#243447">17</text>
+<rect x="100.0" y="385" width="102.4" height="54" rx="4" fill="#f0f6ff" stroke="#b5c3d1"/>
+<rect x="202.4" y="385" width="12.8" height="54" rx="4" fill="#e5f5ee" stroke="#b5c3d1"/>
+<text x="151.2" y="418" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="13" fill="#243447">L0</text>
+<rect x="215.2" y="385" width="102.4" height="54" rx="4" fill="#f0f6ff" stroke="#b5c3d1"/>
+<rect x="317.6" y="385" width="12.8" height="54" rx="4" fill="#e5f5ee" stroke="#b5c3d1"/>
+<text x="266.4" y="418" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="13" fill="#243447">L1</text>
+<rect x="330.4" y="385" width="102.4" height="54" rx="4" fill="#f0f6ff" stroke="#b5c3d1"/>
+<rect x="432.79999999999995" y="385" width="12.8" height="54" rx="4" fill="#e5f5ee" stroke="#b5c3d1"/>
+<text x="381.59999999999997" y="418" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="13" fill="#243447">L2</text>
+<rect x="445.6" y="385" width="102.4" height="54" rx="4" fill="#f0f6ff" stroke="#b5c3d1"/>
+<rect x="548.0" y="385" width="12.8" height="54" rx="4" fill="#e5f5ee" stroke="#b5c3d1"/>
+<text x="496.8" y="418" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="13" fill="#243447">L3</text>
+<rect x="560.8" y="385" width="102.4" height="54" rx="4" fill="#f0f6ff" stroke="#b5c3d1"/>
+<rect x="663.1999999999999" y="385" width="12.8" height="54" rx="4" fill="#e5f5ee" stroke="#b5c3d1"/>
+<text x="612.0" y="418" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="13" fill="#243447">L4</text>
+<rect x="676.0" y="385" width="102.4" height="54" rx="4" fill="#f0f6ff" stroke="#b5c3d1"/>
+<rect x="778.4" y="385" width="12.8" height="54" rx="4" fill="#e5f5ee" stroke="#b5c3d1"/>
+<text x="727.2" y="418" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="13" fill="#243447">L5</text>
+<rect x="791.2" y="385" width="25.6" height="54" rx="4" fill="#f4f1fa" stroke="#b5c3d1"/>
+<text x="804.0" y="418" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="11" fill="#243447">I0</text>
+<rect x="816.8000000000001" y="385" width="25.6" height="54" rx="4" fill="#f4f1fa" stroke="#b5c3d1"/>
+<text x="829.6" y="418" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="11" fill="#243447">I2</text>
+<rect x="842.4000000000001" y="385" width="25.6" height="54" rx="4" fill="#f4f1fa" stroke="#b5c3d1"/>
+<text x="855.2" y="418" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="11" fill="#243447">I4</text>
+<text x="82" y="497" text-anchor="end" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="16" fill="#243447">84</text>
+<rect x="100.0" y="463" width="115.2" height="54" rx="4" fill="#f4f5f7" stroke="#b5c3d1"/>
+<text x="157.6" y="496" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="13" fill="#798697">空槽</text>
+<rect x="215.2" y="463" width="115.2" height="54" rx="4" fill="#f4f5f7" stroke="#b5c3d1"/>
+<text x="272.8" y="496" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="13" fill="#798697">空槽</text>
+<rect x="330.4" y="463" width="102.4" height="54" rx="4" fill="#f0f6ff" stroke="#b5c3d1"/>
+<rect x="432.79999999999995" y="463" width="12.8" height="54" rx="4" fill="#e5f5ee" stroke="#b5c3d1"/>
+<text x="381.59999999999997" y="496" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="13" fill="#243447">L2 · loop2</text>
+<rect x="445.6" y="463" width="102.4" height="54" rx="4" fill="#f0f6ff" stroke="#b5c3d1"/>
+<rect x="548.0" y="463" width="12.8" height="54" rx="4" fill="#e5f5ee" stroke="#b5c3d1"/>
+<text x="496.8" y="496" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="13" fill="#243447">L3 · loop2</text>
+<rect x="560.8" y="463" width="115.2" height="54" rx="4" fill="#f4f5f7" stroke="#b5c3d1"/>
+<text x="618.4" y="496" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="13" fill="#798697">空槽</text>
+<rect x="676.0" y="463" width="115.2" height="54" rx="4" fill="#f4f5f7" stroke="#b5c3d1"/>
+<text x="733.6" y="496" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="13" fill="#798697">空槽</text>
+<rect x="791.2" y="463" width="25.6" height="54" rx="4" fill="#f4f5f7" stroke="#b5c3d1"/>
+<text x="804.0" y="496" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="11" fill="#243447">空</text>
+<rect x="816.8000000000001" y="463" width="25.6" height="54" rx="4" fill="#f4f5f7" stroke="#b5c3d1"/>
+<text x="829.6" y="496" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="11" fill="#243447">空</text>
+<rect x="842.4000000000001" y="463" width="25.6" height="54" rx="4" fill="#f4f5f7" stroke="#b5c3d1"/>
+<text x="855.2" y="496" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="11" fill="#243447">空</text>
+<text x="450" y="555" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="14" fill="#243447">蓝色：latent 512；绿色：RoPE 64；紫色：indexer K 128；灰色：未用槽</text>
+<text x="450" y="584" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="15" fill="#243447">原生页：MLA 144 KiB / indexer 32 KiB；每个 pool ID 合计 960 KiB</text>
+<text x="450" y="613" text-anchor="middle" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="14" fill="#243447">滑窗 ID 使用 288 KiB，仍有 672 KiB 空槽；此成本区别于页字节补齐。</text>
+<rect x="24" y="642" width="852" height="64" rx="4" fill="#fafbfd" stroke="#b5c3d1"/>
+<text x="42" y="669" text-anchor="start" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="14" fill="#243447">实际 backing：6 × latent [N,B,1,512] + 6 × RoPE [N,B,1,64] + 3 × indexer [N,B,1,128]</text>
+<text x="42" y="692" text-anchor="start" font-family="Microsoft YaHei,Segoe UI,sans-serif" font-size="13" fill="#243447">同一物理层的 loop1 / loop2 共用 backing，通过不同活跃 block ID 隔离。N 为 pool block 数；B = 128。</text>
+</svg>

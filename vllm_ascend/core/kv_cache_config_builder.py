@@ -58,6 +58,13 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
+from vllm_ascend.models.glm54.cache_config import (
+    glm54_cache_config,
+    glm54_cache_groups,
+    glm54_pool_bytes,
+    is_glm54_cache_groups,
+    is_glm54_dummy,
+)
 from vllm_ascend.models.kimi_k3.cache_config import _get_kimi_k3_dspark_mixed_kv_cache_groups
 from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
     paired_sfa_cache_config,
@@ -94,6 +101,8 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         mixed-page-size shared slots, then the Kimi-K3 DSpark mixed grouping,
         then vLLM's generic grouping.
         """
+        if is_glm54_dummy(vllm_config):
+            return glm54_cache_groups(vllm_config, kv_cache_spec)
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
             return paired_sfa_cache_groups(vllm_config, kv_cache_spec)
         step5_groups = get_step5_kv_cache_groups(vllm_config, kv_cache_spec, super().get_kv_cache_groups)
@@ -191,6 +200,8 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         kv_cache_groups: list[KVCacheGroupSpec],
     ) -> int | None:
         """Return the pool cost used to build the native descriptors."""
+        if is_glm54_cache_groups(kv_cache_groups):
+            return glm54_pool_bytes(kv_cache_groups)
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
             return paired_sfa_pool_bytes(kv_cache_groups)
         pools = _get_replicated_draft_pools(kv_cache_groups)
@@ -525,7 +536,9 @@ def get_ascend_kv_cache_config_from_groups(
         else get_qwen4_exp_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     )
     pools = _get_replicated_draft_pools(kv_cache_groups)
-    if vllm_config.model_config.hf_config.model_type == "kimi_k31":
+    if is_glm54_cache_groups(kv_cache_groups):
+        kv_cache_config = glm54_cache_config(vllm_config, kv_cache_groups, available_memory)
+    elif vllm_config.model_config.hf_config.model_type == "kimi_k31":
         kv_cache_config = paired_sfa_cache_config(vllm_config, kv_cache_groups, available_memory)
     elif is_step5_groups(kv_cache_groups):
         kv_cache_config = get_step5_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)
